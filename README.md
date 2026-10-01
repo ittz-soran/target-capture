@@ -40,17 +40,68 @@ pip install -r requirements.txt
 The models (YOLO11n, the fast-alpr plate detector and OCR, EasyOCR Arabic, CLIP for car models, InsightFace `buffalo_l`) download automatically the first time you run the tool, about 1 GB in total.
 If you have an NVIDIA GPU, install the CUDA build of `torch` and `onnxruntime-gpu` for a large speed-up.
 
-## Web page
+## Web page: how to use it
 
-```bash
-streamlit run app.py
-```
+### Start it
 
-1. **Upload & index**: upload a file, or paste a path for big DVR files (uploading 5 hours through a browser is slow). Optionally enter the DVR clock time of the first frame so results show real times.
-2. **Find a plate**: type the number.
-3. **Find a person**: upload a face photo or several.
-4. **All faces**: every face found, grouped into numbered people. Click a person to see every time they were seen. A slider sets how alike faces must be to count as the same person.
-5. **All plates**: a table of every plate that was read, and below it a gallery of plates that were found but could not be read (other alphabets, blur, too small). Click one to see the whole frame.
+* **Windows:** double-click `run_windows.bat`. A black window opens and your browser opens the page by itself.
+  If it doesn't, open the **Local URL** shown in the black window (usually `http://localhost:8501`).
+* **Mac / Linux:** `streamlit run app.py`
+* **From an iPad or phone at home:** keep the PC running and open the **Network URL** from the black window
+  (e.g. `http://192.168.1.20:8501`) in Safari, on the same Wi-Fi. If Windows asks about the firewall, click Allow.
+
+Keep the black window open while you use the page. Closing it stops Target Capture.
+
+### Step 1: Upload & index (do this once per video)
+
+1. Open the **1 · Upload & index** tab.
+2. Either drag a video or photo into the upload box, **or** paste the full path of a file on this PC into the box
+   below it (e.g. `D:\DVR\cam1.mp4`). For big DVR files, use the path: uploading hours of video through a browser is slow.
+3. Leave **Read plates** and **Find people** ticked (untick one to go faster if you only need the other).
+4. Optional: type the DVR clock time of the video's first frame (e.g. `2026-09-30 08:00:00`).
+   Results then show real times like `08:42:15` instead of "2 h 42 min into the video".
+5. Click **Start indexing** and wait for the progress bars to finish. A 1-minute clip takes under a minute on a normal PC;
+   a 5-hour video can take a few hours. You can stop it and start again later: it continues where it stopped.
+
+Under **Advanced** you can change:
+* **Plate script:** *Auto* (default) reads English and Arabic plates. *English only* is faster if you only have English plates.
+* **Car make and model:** untick to go faster if you don't need "Toyota Corolla" etc.
+* **Re-index from scratch:** tick this after an update to re-read an old video with the new features.
+
+### Step 2: Search
+
+**Find a plate** (tab 2)
+* Type the plate and click **Search plate**. All of these work:
+  `12345` (just the number), `١٢٣٤٥` (Arabic digits), `21 B 34567`, `12?45` (`?` = one unknown character), `12*` (`*` = anything after).
+* **Allowed character differences** (default 1) still finds the car when one character was misread.
+* Each result shows the time, how long the car was visible, vehicle make, model and colour, governorate,
+  a picture of the frame, and a close-up of the plate.
+
+**Find a person** (tab 3)
+* Upload one or more clear photos of the person's face and click **Search person**.
+  More photos (different angles) give better results.
+* The answer is how many times the person was seen, and for each time: start and end, duration,
+  how sure the match is (high / medium / low), clothing colours, and pictures.
+* Too many wrong people? Move the **Match threshold** slider up. Missing sightings? Move it down a little.
+
+### Step 3: Browse everything
+
+**All faces** (tab 4)
+* Every face in the video, grouped into people: **#1, #2, #3…**, each with a photo, how many times they were seen,
+  and when they first appeared.
+* Click **Show #N** to see every sighting of that person. Click **Close** to go back to the list.
+* If two different people were put together, move the slider to the right. If one person appears twice in the list, move it left.
+
+**All plates** (tab 5)
+* **Read plates:** a table of every plate read, with times, vehicle and details. Type in the filter box
+  (e.g. `corolla`, `white toyota`, `Erbil`) to narrow it down.
+* **Plates that could not be read:** pictures of plates that were found but not read (other alphabets,
+  blur, too small). Click **Open** under one to see the whole frame.
+
+### Where results are saved
+
+Every search also saves a report in the `results` folder: `report.html` (open it in a browser to see or print it),
+plus `results.csv` (opens in Excel) and `results.json`.
 
 ## Command line
 

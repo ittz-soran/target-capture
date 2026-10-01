@@ -69,8 +69,9 @@ def cached_identities(db, db_mtime, threshold):
     return ppl
 
 
-tab_index, tab_plate, tab_person, tab_faces, tab_all, tab_teach = st.tabs(
-    ["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "All faces", "All plates", "Teach"])
+tab_index, tab_plate, tab_person, tab_faces, tab_all, tab_teach, tab_tips = st.tabs(
+    ["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "All faces", "All plates", "Teach",
+     "Best results"])
 
 with tab_index:
     up = st.file_uploader("Video or image", type=["mp4", "avi", "mkv", "mov", "dav", "h264", "ts",
@@ -337,3 +338,6 @@ with tab_teach:
         if st.button("Export to results/taught_plates", disabled=not n_labels):
             n = T.export(store, os.path.join(RESULTS, "taught_plates"))
             st.success(f"Wrote {n} plate pictures and labels.csv to {os.path.join(RESULTS, 'taught_plates')}")
+
+with tab_tips:
+    st.markdown(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TIPS.md"), encoding="utf-8").read())

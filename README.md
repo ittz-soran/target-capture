@@ -119,6 +119,10 @@ What the system does with your answers:
   as pictures plus `labels.csv`. With a few hundred of them, the plate reader itself can be retrained on your
   cameras' plates, which is the real long-term accuracy gain.
 
+### Best results tab
+
+The **Best results** tab (also in `TIPS.md`) explains how to get the most out of your cameras, settings and searches.
+
 ### Where results are saved
 
 Every search also saves a report in the `results` folder: `report.html` (open it in a browser to see or print it),

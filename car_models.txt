@@ -1,0 +1,87 @@
+# Car makes and models the recognizer chooses between. One per line, "Make Model".
+# Edit freely: a shorter list of what really drives on your roads gives better answers.
+# Lines starting with # are ignored. Common in Iraq and the Kurdistan Region first.
+Toyota Corolla
+Toyota Camry
+Toyota Land Cruiser
+Toyota Land Cruiser Prado
+Toyota Hilux
+Toyota Yaris
+Toyota RAV4
+Toyota Avalon
+Toyota Hiace
+Toyota Fortuner
+Toyota Crown
+Nissan Altima
+Nissan Sunny
+Nissan Patrol
+Nissan Maxima
+Nissan Pathfinder
+Nissan X-Trail
+Nissan Navara
+Hyundai Elantra
+Hyundai Sonata
+Hyundai Accent
+Hyundai Tucson
+Hyundai Santa Fe
+Hyundai Azera
+Kia Cerato
+Kia Optima
+Kia K5
+Kia Rio
+Kia Sportage
+Kia Sorento
+Kia Picanto
+Chevrolet Malibu
+Chevrolet Cruze
+Chevrolet Tahoe
+Chevrolet Captiva
+Chevrolet Silverado
+Chevrolet Camaro
+GMC Yukon
+GMC Sierra
+Ford Taurus
+Ford Explorer
+Ford F-150
+Ford Mustang
+Ford Expedition
+Honda Accord
+Honda Civic
+Honda CR-V
+Mitsubishi Pajero
+Mitsubishi Lancer
+Mitsubishi L200
+Mercedes-Benz E-Class
+Mercedes-Benz S-Class
+Mercedes-Benz C-Class
+Mercedes-Benz G-Class
+BMW 5 Series
+BMW 7 Series
+BMW X5
+Lexus LX
+Lexus ES
+Dodge Charger
+Dodge Ram
+Jeep Grand Cherokee
+Jeep Wrangler
+Land Rover Range Rover
+Peugeot 206
+Peugeot 405
+Renault Logan
+Volkswagen Passat
+Volkswagen Golf
+Volkswagen up!
+Skoda Octavia
+Skoda Citigo
+Saipa Saina
+Iran Khodro Samand
+Chery Tiggo
+Geely Emgrand
+Changan CS35
+Great Wall Wingle
+MG ZS
+Daewoo Lanos
+Opel Astra
+Isuzu D-Max
+Suzuki Swift
+Mazda 6

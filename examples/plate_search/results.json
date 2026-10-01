@@ -1,0 +1,53 @@
+[
+  {
+    "n": 1,
+    "plate": "5AU5341",
+    "exact": false,
+    "edit_distance": 0,
+    "ocr_variants": [
+      "5AU5341"
+    ],
+    "reads": 10,
+    "ocr_conf": 1.0,
+    "region_guess": "Czech Republic",
+    "vehicle_type": "car",
+    "vehicle_color": "gray",
+    "start": "00:00:05",
+    "end": "00:00:07",
+    "duration_s": 2.2,
+    "start_seconds": 5.76,
+    "end_seconds": 7.92,
+    "clock_start": "2026-09-30 08:00:05",
+    "clock_end": "2026-09-30 08:00:07",
+    "frame": 192,
+    "video": "/tmp/claude-0/m/plates_demo.mp4",
+    "frame_image": "001_frame.jpg",
+    "plate_image": "001_plate.jpg"
+  },
+  {
+    "n": 2,
+    "plate": "5AU5341",
+    "exact": false,
+    "edit_distance": 0,
+    "ocr_variants": [
+      "5AU534",
+      "5AU5341"
+    ],
+    "reads": 11,
+    "ocr_conf": 1.0,
+    "region_guess": "Czech Republic",
+    "vehicle_type": "car",
+    "vehicle_color": "gray",
+    "start": "00:00:40",
+    "end": "00:00:42",
+    "duration_s": 2.4,
+    "start_seconds": 40.56,
+    "end_seconds": 42.96,
+    "clock_start": "2026-09-30 08:00:40",
+    "clock_end": "2026-09-30 08:00:42",
+    "frame": 1014,
+    "video": "/tmp/claude-0/m/plates_demo.mp4",
+    "frame_image": "002_frame.jpg",
+    "plate_image": "002_plate.jpg"
+  }
+]

@@ -1,0 +1,12 @@
+# Local data: never commit footage, indexes or results
+.venv/
+__pycache__/
+*.db
+*.db-journal
+uploads/
+results/
+target-capture.zip
+*.mp4
+*.avi
+*.mkv
+*.dav

@@ -1,0 +1,2 @@
+n,plate,exact,partial_match,edit_distance,ocr_variants,reads,ocr_conf,region_guess,vehicle_type,vehicle_color,vehicle_model,model_confidence,other_possible_models,start,end,duration_s,start_seconds,end_seconds,frame,video,frame_image,plate_image
+1,21 34567,False,True,0,21 34567,1,1.0,,car,gray,Volkswagen up!,0.59,,00:00:00,00:00:00,0.0,0.0,0.0,0,/tmp/claude-0/m/ar/car_baghdad_new.png,001_frame.jpg,001_plate.jpg

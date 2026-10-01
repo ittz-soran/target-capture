@@ -1,0 +1,12 @@
+# CPU works out of the box; install the CUDA build of torch / onnxruntime-gpu for a GPU.
+ultralytics>=8.3        # YOLO detection + ByteTrack tracking
+fast-alpr[onnx]>=0.3    # license plate detector + plate OCR (ONNX)
+open_clip_torch>=2.20    # car make/model recognition
+easyocr>=1.7            # Arabic + English plate OCR (--plate-script arabic)
+insightface>=0.7.3      # face detection + ArcFace embeddings
+onnxruntime>=1.17
+opencv-python-headless>=4.8
+numpy
+tqdm
+lap                     # used by the ByteTrack tracker
+streamlit>=1.30         # optional: web UI (app.py)

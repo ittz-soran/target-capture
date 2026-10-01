@@ -1,0 +1,29 @@
+[
+  {
+    "n": 1,
+    "plate": "21 34567",
+    "exact": false,
+    "partial_match": true,
+    "edit_distance": 0,
+    "ocr_variants": [
+      "21 34567"
+    ],
+    "reads": 1,
+    "ocr_conf": 1.0,
+    "region_guess": null,
+    "vehicle_type": "car",
+    "vehicle_color": "gray",
+    "vehicle_model": "Volkswagen up!",
+    "model_confidence": 0.59,
+    "other_possible_models": null,
+    "start": "00:00:00",
+    "end": "00:00:00",
+    "duration_s": 0.0,
+    "start_seconds": 0.0,
+    "end_seconds": 0.0,
+    "frame": 0,
+    "video": "/tmp/claude-0/m/ar/car_baghdad_new.png",
+    "frame_image": "001_frame.jpg",
+    "plate_image": "001_plate.jpg"
+  }
+]

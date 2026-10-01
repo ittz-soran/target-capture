@@ -36,3 +36,28 @@ def test_parse_iraqi_plate_tokens():
     assert text == "12345" and d["governorate"] == "Erbil" and d["plate_type"] == "private"
     text, d = parse_tokens([(5, "IRQ"), (40, "بغداد"), (50, "21"), (60, "ب"), (70, "34567")])
     assert text == "21 ب 34567" and d["governorate"] == "Baghdad"
+
+
+def test_taught_mistake_is_applied_to_new_reads():
+    from targetcapture.teach import Memory
+
+    class FakeStore:
+        def labels(self):
+            return [{"ocr_text": "07VA9", "label": "56789", "sig": None}]
+
+    m = Memory(FakeStore())
+    r = m.apply({"text": "07VA9", "conf": 0.99})
+    assert r["text"] == "56789" and r["source"] == "learned" and r["ocr_guess"] == "07VA9"
+    assert m.apply({"text": "12345", "conf": 0.99})["text"] == "12345"
+
+
+def test_plate_pictures_tolerate_small_shifts():
+    import numpy as np
+    from targetcapture.teach import plate_signature, signature_similarity
+
+    rng = np.random.default_rng(0)
+    plate = (rng.random((60, 200)) * 255).astype(np.uint8)
+    shifted = np.roll(plate, 3, axis=1)
+    other = (rng.random((60, 200)) * 255).astype(np.uint8)
+    a, b, c = plate_signature(plate), plate_signature(shifted), plate_signature(other)
+    assert signature_similarity(a, b) > 0.8 > signature_similarity(a, c)

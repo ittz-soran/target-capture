@@ -51,7 +51,9 @@ def index_media(store: Store, path: str, plates: bool = True, persons: bool = Tr
     if plates:
         if reindex:
             store.reset(mid, "plates")
-        idx = L.PlateIndexer(min_ocr_conf=min_ocr_conf, vehicle_crops=vehicle_crops, script=plate_script,
+        from .teach import Memory
+
+        idx = L.PlateIndexer(memory=Memory(store), min_ocr_conf=min_ocr_conf, vehicle_crops=vehicle_crops, script=plate_script,
                              car_models=car_models)
         result["plates"] = index_pass(store, mid, info, "plates", idx, plate_fps, motion_skip, progress)
     if persons:

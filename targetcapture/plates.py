@@ -57,7 +57,7 @@ class PlateIndexer:
     def __init__(self, detector_model="yolo-v9-t-384-license-plate-end2end",
                  ocr_model="cct-s-v2-global-model", vehicle_model="yolo11n.pt",
                  min_det_conf=0.4, min_ocr_conf=0.5, min_chars=4, vehicle_crops=False, script="auto",
-                 car_models=True):
+                 car_models=True, memory=None):
         from fast_alpr import ALPR
         from ultralytics import YOLO
 
@@ -68,6 +68,7 @@ class PlateIndexer:
         self.min_chars = min_chars
         self.vehicle_crops = vehicle_crops
         self._t, self._latin_seen = 0.0, []
+        self.memory = memory  # teach.Memory: corrections typed in the Teach tab
         self.min_unread_det = 0.55  # unreadable plates are kept only when the detector is this sure
         # Make / model ("Toyota Corolla") of the vehicle carrying each plate
         self.models = None
@@ -180,6 +181,9 @@ class PlateIndexer:
                         reads.append(r)
         if not reads:
             return []
+        if self.memory:
+            for r in reads:
+                self.memory.apply(r, img)
         if vehicles is None:
             vehicles = self._vehicles(img)
         for r in reads:
@@ -278,6 +282,9 @@ def _summarize(g: list[dict]) -> dict:
         "model_conf": round(model_score / n_model, 2) if model else None,
         "model_alternatives": [m for m, _ in vmodels.most_common(3)[1:]],
         "best": best,
+        "ids": [r["id"] for r in g if "id" in r],
+        "source": "taught" if any(r.get("source") == "taught" for r in g)
+                  else "learned" if any(r.get("source") == "learned" for r in g) else None,
     }
 
 
@@ -313,7 +320,7 @@ def group_unread(rows, gap: float = 2.0) -> list[dict]:
         out.append({"media_id": g[0]["media_id"], "start": g[0]["t"], "end": g[-1]["t"], "detections": len(g),
                     "best": best, "vehicle_type": best["vehicle_type"], "vehicle_color": best["vehicle_color"],
                     "vehicle_model": models.most_common(1)[0][0] if models else None,
-                    "ocr_guess": best.get("ocr_guess")})
+                    "ocr_guess": best.get("ocr_guess"), "ids": [r["id"] for r in g if "id" in r]})
     return sorted(out, key=lambda c: (c["media_id"], c["start"]))
 
 

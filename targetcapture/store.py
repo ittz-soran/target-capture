@@ -30,9 +30,18 @@ CREATE TABLE IF NOT EXISTS plate_reads (
     vehicle_type TEXT, vehicle_color TEXT,
     vehicle_model TEXT, model_conf REAL,   -- e.g. "Toyota Corolla", 0.62
     ocr_guess TEXT,                        -- for plates that could not be read (text = ''): OCR's best guess
+    source TEXT,                           -- NULL = read by OCR, 'taught' = typed by the user, 'learned' = from a lesson
     vx1 INTEGER, vy1 INTEGER, vx2 INTEGER, vy2 INTEGER
 );
 CREATE INDEX IF NOT EXISTS plate_reads_media_t ON plate_reads(media_id, t);
+CREATE TABLE IF NOT EXISTS plate_labels (   -- corrections typed in the Teach tab; survive re-indexing
+    id INTEGER PRIMARY KEY,
+    media_id INTEGER, frame INTEGER, x1 INTEGER, y1 INTEGER, x2 INTEGER, y2 INTEGER,
+    ocr_text TEXT,          -- what the reader said ('' if it could not read it)
+    label TEXT,             -- the correct plate text, '' for "not a plate"
+    sig BLOB,               -- small grey picture of the plate (48x144 uint8), for look-alike suggestions
+    created TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS person_dets (
     id INTEGER PRIMARY KEY,
     media_id INTEGER NOT NULL REFERENCES media(id),
@@ -54,7 +63,7 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(plate_reads)")}
-        for col, typ in (("vehicle_model", "TEXT"), ("model_conf", "REAL"), ("ocr_guess", "TEXT")):  # older indexes
+        for col, typ in (("vehicle_model", "TEXT"), ("model_conf", "REAL"), ("ocr_guess", "TEXT"), ("source", "TEXT")):  # older indexes
             if col not in cols:
                 self.db.execute(f"ALTER TABLE plate_reads ADD COLUMN {col} {typ}")
 
@@ -95,10 +104,11 @@ class Store:
     def add_plate_reads(self, media_id: int, rows: list[dict]):
         self.db.executemany(
             """INSERT INTO plate_reads(media_id, frame, t, text, conf, region, x1, y1, x2, y2,
-               vehicle_type, vehicle_color, vehicle_model, model_conf, ocr_guess, vx1, vy1, vx2, vy2)
+               vehicle_type, vehicle_color, vehicle_model, model_conf, ocr_guess, source, vx1, vy1, vx2, vy2)
                VALUES (:media_id, :frame, :t, :text, :conf, :region, :x1, :y1, :x2, :y2,
-               :vehicle_type, :vehicle_color, :vehicle_model, :model_conf, :ocr_guess, :vx1, :vy1, :vx2, :vy2)""",
-            [{"media_id": media_id, "vehicle_model": None, "model_conf": None, "ocr_guess": None, **r} for r in rows],
+               :vehicle_type, :vehicle_color, :vehicle_model, :model_conf, :ocr_guess, :source, :vx1, :vy1, :vx2, :vy2)""",
+            [{"media_id": media_id, "vehicle_model": None, "model_conf": None, "ocr_guess": None, "source": None, **r}
+             for r in rows],
         )
 
     def plate_reads(self, media_id: int | None = None, unread: bool = False):
@@ -110,6 +120,33 @@ class Store:
             q += " AND media_id=?"
             args = (media_id,)
         return self.db.execute(q + " ORDER BY media_id, t", args).fetchall()
+
+    def set_plate_text(self, ids: list[int], text: str, source: str):
+        """Overwrite the text of these reads, keeping what the OCR said in ocr_guess."""
+        if not ids:
+            return
+        q = ",".join("?" * len(ids))
+        self.db.execute(f"UPDATE plate_reads SET ocr_guess = COALESCE(ocr_guess, NULLIF(text, '')) WHERE id IN ({q})", ids)
+        self.db.execute(f"UPDATE plate_reads SET text=?, source=?, conf=1.0 WHERE id IN ({q})", [text, source, *ids])
+        self.db.commit()
+
+    def delete_plate_reads(self, ids: list[int]):
+        if ids:
+            self.db.execute(f"DELETE FROM plate_reads WHERE id IN ({','.join('?' * len(ids))})", ids)
+            self.db.commit()
+
+    def reads_with_text(self, text: str):
+        return self.db.execute("SELECT * FROM plate_reads WHERE text=? AND source IS NULL", (text,)).fetchall()
+
+    def add_label(self, row, ocr_text: str, label: str, sig):
+        self.db.execute(
+            "INSERT INTO plate_labels(media_id, frame, x1, y1, x2, y2, ocr_text, label, sig) VALUES (?,?,?,?,?,?,?,?,?)",
+            (row["media_id"], row["frame"], row["x1"], row["y1"], row["x2"], row["y2"], ocr_text, label,
+             sig))
+        self.db.commit()
+
+    def labels(self):
+        return self.db.execute("SELECT * FROM plate_labels ORDER BY id").fetchall()
 
     # ---- persons -----------------------------------------------------------
     def max_track_id(self, media_id: int) -> int:

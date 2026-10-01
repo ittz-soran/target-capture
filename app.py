@@ -9,6 +9,7 @@ import streamlit as st
 
 from targetcapture import persons as P
 from targetcapture import plates as L
+from targetcapture import teach as T
 from targetcapture.pipeline import index_media
 from targetcapture.report import person_report, plate_report, thumbnail
 from targetcapture.store import Store, clock_time, fmt_offset
@@ -68,8 +69,8 @@ def cached_identities(db, db_mtime, threshold):
     return ppl
 
 
-tab_index, tab_plate, tab_person, tab_faces, tab_all = st.tabs(
-    ["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "All faces", "All plates"])
+tab_index, tab_plate, tab_person, tab_faces, tab_all, tab_teach = st.tabs(
+    ["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "All faces", "All plates", "Teach"])
 
 with tab_index:
     up = st.file_uploader("Video or image", type=["mp4", "avi", "mkv", "mov", "dav", "h264", "ts",
@@ -202,6 +203,7 @@ with tab_all:
         "clock": clock_time(store.media(s["media_id"]), s["start"]), "reads": s["reads"],
         "conf": s["conf"], "vehicle": f"{s['vehicle_color'] or ''} {s['vehicle_model'] or s['vehicle_type'] or ''}".strip(),
         "details": s["region"],
+        "source": {"taught": "typed by you", "learned": "learned"}.get(s["source"], "read"),
         "video": os.path.basename(store.media(s["media_id"])["path"]),
     } for s in sightings], use_container_width=True)
 
@@ -238,3 +240,100 @@ with tab_all:
             if st.button("Open", key=f"cap_{n}"):
                 st.session_state.cap_sel = n
                 st.rerun()
+
+with tab_teach:
+    st.caption("Help the system: type the correct text for plates it could not read or read wrongly. "
+               "Your answers are searchable at once, and the system uses them to recognise the same plate "
+               "(and the same reading mistake) in the future.")
+    mode = st.radio("What to check", ["unread", "check", "find"], horizontal=True, key="teach_mode",
+                    format_func=lambda m: {"unread": "Plates it could not read",
+                                           "check": "Check read plates (least sure first)",
+                                           "find": "Correct a specific plate"}[m])
+    if mode == "unread":
+        queue = L.group_unread(store.plate_reads(unread=True))
+    else:
+        queue = [s for s in L.group_sightings(store.plate_reads()) if s["source"] != "taught"]
+        if mode == "find":
+            q = st.text_input("Plate as the system shows it (from the All plates table)", key="teach_find")
+            queue = [s for s in queue if q and L.match_score(q, s["text"], 1)[0]]
+        else:
+            queue.sort(key=lambda s: (s["conf"], s["reads"]))
+
+    last = st.session_state.get("teach_last")
+    if last:  # follow-ups to the correction just saved
+        with st.container(border=True):
+            st.success(f"Saved **{last['label'] or 'not a plate'}**.")
+            if last["same_mistake"]:
+                n = len(last["same_mistake"])
+                if st.button(f"Also fix {n} other read(s) that were read as \"{last['ocr_text']}\""):
+                    store.set_plate_text(last["same_mistake"], last["label"], "taught")
+                    last["same_mistake"] = []
+                    st.rerun()
+            if last["sig"] is not None and last["label"]:
+                pool = L.group_unread(store.plate_reads(unread=True)) + [
+                    s for s in L.group_sightings(store.plate_reads()) if s["source"] is None and s["conf"] < 0.9]
+                sims = T.similar_captures(store, last["sig"], pool)[:12]
+                if sims:
+                    st.markdown(f"These look like the same plate. Tick the ones that are **{last['label']}**:")
+                    cols = st.columns(6)
+                    picked = []
+                    for i, (sim, c) in enumerate(sims):
+                        media = store.media(c["media_id"])
+                        with cols[i % 6]:
+                            img = thumbnail(c["best"], media["path"], THUMBS, pad=0.1, min_w=200)
+                            if img:
+                                st.image(img, use_container_width=True)
+                            if st.checkbox(f"{fmt_offset(c['start'])} · {sim:.0%} alike", key=f"sim_{i}_{c['ids'][:1]}"):
+                                picked.append(c)
+                    if picked and st.button(f"Apply {last['label']} to {len(picked)} selected"):
+                        for c in picked:
+                            store.set_plate_text(c["ids"], last["label"], "taught")
+                        st.session_state.teach_last = None
+                        st.rerun()
+            if st.button("Done", key="teach_done"):
+                st.session_state.teach_last = None
+                st.rerun()
+
+    if not queue:
+        st.info("Nothing to check here." if mode != "find" else "Type a plate above to find it.")
+    else:
+        i = min(st.session_state.get(f"teach_i_{mode}", 0), len(queue) - 1)
+        c = queue[i]
+        media = store.media(c["media_id"])
+        clock = clock_time(media, c["start"])
+        st.markdown(f"**{i + 1} of {len(queue)}** · {fmt_offset(c['start'])}{' (' + clock + ')' if clock else ''}"
+                    f" · {os.path.basename(media['path'])}")
+        left, right = st.columns([1, 2])
+        crop = thumbnail(c["best"], media["path"], THUMBS, pad=0.1, min_w=360)
+        frame = thumbnail(c["best"], media["path"], THUMBS, full=True)
+        if crop:
+            left.image(crop, use_container_width=True)
+        if frame:
+            right.image(frame, use_container_width=True)
+        current = c.get("text") or ""
+        guess = current or c.get("ocr_guess") or ""
+        vehicle = f"{c['vehicle_color'] or ''} {c['vehicle_model'] or c['vehicle_type'] or ''}".strip()
+        left.caption(f"System read: **{current or 'nothing'}**"
+                     f"{' · guess: ' + c['ocr_guess'] if not current and c.get('ocr_guess') else ''}"
+                     f"{' · ' + vehicle if vehicle else ''}")
+        with left.form(f"teach_form_{mode}_{i}"):
+            label = st.text_input("Correct plate text (Arabic or English digits both fine)", value=guess)
+            b1, b2, b3 = st.columns(3)
+            save = b1.form_submit_button("Save", type="primary")
+            notplate = b2.form_submit_button("No plate")
+            skip = b3.form_submit_button("Skip")
+        if save or notplate:
+            if save and not L.normalize(label):
+                st.warning("Type the plate text first, or click No plate.")
+            else:
+                st.session_state.teach_last = T.teach(store, c["ids"], c["best"], label, not_a_plate=bool(notplate))
+                st.rerun()
+        if skip:
+            st.session_state[f"teach_i_{mode}"] = (i + 1) % len(queue)
+            st.rerun()
+    with st.expander("Export what you taught (for training a better reader)"):
+        n_labels = len([lab for lab in store.labels() if lab["label"]])
+        st.caption(f"{n_labels} plate(s) taught so far.")
+        if st.button("Export to results/taught_plates", disabled=not n_labels):
+            n = T.export(store, os.path.join(RESULTS, "taught_plates"))
+            st.success(f"Wrote {n} plate pictures and labels.csv to {os.path.join(RESULTS, 'taught_plates')}")

@@ -98,6 +98,27 @@ Under **Advanced** you can change:
 * **Plates that could not be read:** pictures of plates that were found but not read (other alphabets,
   blur, too small). Click **Open** under one to see the whole frame.
 
+### Teach: correct the system (tab 6)
+
+Use this when a plate was not read, or was read wrongly.
+
+1. Pick what to check: **Plates it could not read**, **Check read plates** (least sure first),
+   or **Correct a specific plate** (type the plate as the All plates table shows it).
+2. Look at the close-up and the full frame, type the correct text (Arabic or English digits), and click **Save**.
+   **No plate** removes a false detection; **Skip** moves to the next one.
+3. After saving you may see:
+   * **Also fix N other reads that were read as "…"**: the same reading mistake elsewhere. One click fixes them all.
+   * **These look like the same plate**: captures that look similar. Tick only the ones where the number really matches.
+
+What the system does with your answers:
+* The corrected plate is searchable straight away, and shows "typed by you" in the All plates table.
+* If the reader makes the **same mistake** again (in new videos too), it is corrected automatically and marked "learned".
+* Similar-looking plates are only ever **suggested**, never changed by themselves: plates of the same style with
+  different numbers look almost identical to a picture comparison, so only you can confirm the number.
+* **Export** (at the bottom of the tab, or `python -m targetcapture export-taught`) saves your corrected plates
+  as pictures plus `labels.csv`. With a few hundred of them, the plate reader itself can be retrained on your
+  cameras' plates, which is the real long-term accuracy gain.
+
 ### Where results are saved
 
 Every search also saves a report in the `results` folder: `report.html` (open it in a browser to see or print it),

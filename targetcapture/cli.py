@@ -113,6 +113,13 @@ def cmd_find_person(a):
     print(f"Report: {os.path.join(out, 'report.html')}")
 
 
+def cmd_export_taught(a):
+    from .teach import export
+
+    n = export(Store(a.db), a.out)
+    print(f"Wrote {n} taught plate(s) to {a.out} (images/ + labels.csv)")
+
+
 def cmd_media(a):
     store = Store(a.db)
     for m in store.media():
@@ -167,6 +174,10 @@ def main(argv=None):
     s.add_argument("--min-face", type=int, default=20, help="ignore faces smaller than this many pixels wide")
     s.add_argument("--out")
     s.set_defaults(fn=cmd_find_person)
+
+    s = sub.add_parser("export-taught", help="save plates typed in the Teach tab as images + labels.csv")
+    s.add_argument("out", nargs="?", default=os.path.join("results", "taught_plates"))
+    s.set_defaults(fn=cmd_export_taught)
 
     s = sub.add_parser("media", help="list indexed media")
     s.set_defaults(fn=cmd_media)

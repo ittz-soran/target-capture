@@ -15,6 +15,7 @@ Python 3.10 to 3.13 (3.11 recommended).
 1. Python: `setup_windows.bat` finds it, or installs Python 3.11 for you if it is missing. (By hand: python.org, tick "Add python.exe to PATH".)
 2. Install "Microsoft C++ Build Tools" (choose "Desktop development with C++"); InsightFace needs it.
 3. Double-click `setup_windows.bat` once, then `run_windows.bat` whenever you want to use it.
+   With an NVIDIA graphics card (GTX / RTX), also double-click `setup_gpu_windows.bat` once: indexing gets several times faster.
 4. To get a new version, double-click `update_windows.bat` (needs Git for Windows). Your videos, index and results are kept.
 
 Or by hand in Command Prompt, inside the `target-capture` folder:
@@ -38,7 +39,7 @@ pip install -r requirements.txt
 ```
 
 The models (YOLO11n, the fast-alpr plate detector and OCR, EasyOCR Arabic, CLIP for car models, InsightFace `buffalo_l`) download automatically the first time you run the tool, about 1 GB in total.
-If you have an NVIDIA GPU, install the CUDA build of `torch` and `onnxruntime-gpu` for a large speed-up.
+If you have an NVIDIA GPU, install the CUDA build of `torch` and `onnxruntime-gpu` for a large speed-up (on Windows: double-click `setup_gpu_windows.bat` once). The left side of the web page says whether the GPU or the CPU is used.
 
 ## Web page: how to use it
 

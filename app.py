@@ -24,7 +24,15 @@ st.title("Target Capture")
 db_path = st.sidebar.text_input("Index database", "targetcapture.db")
 store = Store(db_path)
 
+@st.cache_resource
+def device_line():
+    from targetcapture.gpu import describe
+
+    return describe()
+
+
 with st.sidebar:
+    st.caption(device_line())
     st.subheader("Indexed media")
     for m in store.media():
         dur = fmt_offset(m["frames"] / m["fps"]) if m["kind"] == "video" else "image"

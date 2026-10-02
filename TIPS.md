@@ -56,7 +56,7 @@ reads far better than a wide view of a whole street.
 
 ### 7. Speed
 
-* A PC with an **NVIDIA graphics card** indexes many times faster than the processor alone.
+* A PC with an **NVIDIA graphics card** indexes many times faster than the processor alone. Run `setup_gpu_windows.bat` once so it is used; the left side of the page then shows "GPU: <card name>".
 * Long videos: start indexing in the evening and leave the window open. If it stops, start it again:
   it continues where it left off.
 * Searching an already indexed video takes seconds. You never need to index the same video twice

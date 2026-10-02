@@ -1,4 +1,4 @@
-# CPU works out of the box; install the CUDA build of torch / onnxruntime-gpu for a GPU.
+# CPU works out of the box. NVIDIA GPU on Windows: run setup_gpu_windows.bat (CUDA torch + onnxruntime-gpu).
 ultralytics>=8.3        # YOLO detection + ByteTrack tracking
 fast-alpr[onnx]>=0.3    # license plate detector + plate OCR (ONNX)
 open_clip_torch>=2.20    # car make/model recognition

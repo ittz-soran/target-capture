@@ -20,6 +20,12 @@ if not exist .venv\Scripts\python.exe (
 call .venv\Scripts\activate.bat
 pip install -q -r requirements.txt
 if errorlevel 1 (echo Installing libraries failed, see the error above. & pause & exit /b 1)
+if exist .venv\gpu.txt (
+  REM requirements.txt brings back the CPU-only onnxruntime; swap the GPU one in again
+  pip uninstall -q -y onnxruntime onnxruntime-gpu
+  pip install -q --force-reinstall --no-deps onnxruntime-gpu
+  pip install -q onnxruntime-gpu
+)
 echo.
 echo Update done. Start it with run_windows.bat
 pause

@@ -61,8 +61,11 @@ class PlateIndexer:
         from fast_alpr import ALPR
         from ultralytics import YOLO
 
+        from .gpu import onnx_providers
+
         self.alpr = ALPR(detector_model=detector_model, ocr_model=ocr_model,
-                         detector_conf_thresh=min_det_conf)
+                         detector_conf_thresh=min_det_conf, detector_providers=onnx_providers(),
+                         ocr_providers=onnx_providers())
         self.vehicles = YOLO(vehicle_model)
         self.min_ocr_conf = min_ocr_conf
         self.min_chars = min_chars

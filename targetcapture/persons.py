@@ -27,12 +27,15 @@ log = logging.getLogger(__name__)
 
 
 class FaceModel:
-    def __init__(self, name="buffalo_l", providers=("CPUExecutionProvider",)):
+    def __init__(self, name="buffalo_l", providers=None):
         from insightface.app import FaceAnalysis
 
+        from .gpu import onnx_providers
+
+        providers = providers or onnx_providers()
         self.app = FaceAnalysis(name=name, providers=list(providers),
                                 allowed_modules=["detection", "recognition"])
-        self.app.prepare(ctx_id=-1, det_size=(640, 640))
+        self.app.prepare(ctx_id=0 if providers[0] == "CUDAExecutionProvider" else -1, det_size=(640, 640))
         self.det = self.app.det_model
         self.rec = self.app.models["recognition"]
 

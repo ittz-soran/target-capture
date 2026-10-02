@@ -67,6 +67,50 @@ def plate_report(store, query, hits, out_dir):
     return rows
 
 
+def vehicle_report(store, vehicles, out_dir, title="Vehicle search"):
+    """Results of a car search: the vehicle close-up, the whole frame and its details."""
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+    for i, v in enumerate(vehicles, 1):
+        media = store.media(v["media_id"])
+        b = v["best"]
+        frame = store.frame(b)
+        snap = crop = None
+        if frame is not None:
+            crop = _save(_crop(frame, b["x1"], b["y1"], b["x2"], b["y2"], pad=0.05, min_w=200),
+                         os.path.join(out_dir, f"{i:03d}_vehicle.jpg"))
+            cv2.rectangle(frame, (b["x1"], b["y1"]), (b["x2"], b["y2"]), GREEN, 3)
+            snap = _save(frame, os.path.join(out_dir, f"{i:03d}_frame.jpg"), max_w=1280)
+        rows.append({"n": i, "vehicle_type": v["vehicle_type"], "vehicle_color": v["vehicle_color"],
+                     "vehicle_model": v["vehicle_model"], "plate": v["plate"] or "not read",
+                     **_times(media, v["start"], v["end"]), "frame": b["frame"], "video": media["path"],
+                     "frame_image": snap, "vehicle_image": crop})
+    _write(out_dir, rows, title, f"{len(rows)} vehicle(s)")
+    return rows
+
+
+def alert_report(store, alerts, out_dir):
+    """Watch-list matches with a snapshot each."""
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+    for a in alerts:
+        media = store.media(a["media_id"])
+        if media is None:
+            continue
+        frame = store.frame(a)
+        snap = crop = None
+        if frame is not None and a["x1"] is not None:
+            crop = _save(_crop(frame, a["x1"], a["y1"], a["x2"], a["y2"], pad=0.3, min_w=200),
+                         os.path.join(out_dir, f"alert_{a['id']}_crop.jpg"))
+            cv2.rectangle(frame, (a["x1"], a["y1"]), (a["x2"], a["y2"]), RED, 3)
+            snap = _save(frame, os.path.join(out_dir, f"alert_{a['id']}_frame.jpg"), max_w=1280)
+        rows.append({"n": a["id"], "wanted": f"{a['kind']}: {a['value']}", "note": a["note"] or None,
+                     "found": a["text"], **_times(media, a["start"], a["end"]), "video": media["path"],
+                     "new": not a["seen"], "frame_image": snap,
+                     ("plate_image" if a["kind"] == "plate" else "face_image"): crop})
+    return rows
+
+
 def _plate_snapshot(store, s, b, out_dir, stem):
     """Save the whole frame (boxes drawn) and the plate close-up of one capture."""
     frame = store.frame(b)

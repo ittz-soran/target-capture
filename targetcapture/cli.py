@@ -47,7 +47,7 @@ def cmd_index(a):
         res = index_media(store, path, plates=do_plates, persons=do_persons, plate_fps=a.plate_fps,
                           person_fps=a.person_fps, clock_start=a.clock_start, min_ocr_conf=a.min_ocr_conf,
                           vehicle_crops=a.vehicle_crops, plate_script=a.plate_script, car_models=not a.no_car_model, motion_skip=not a.no_motion_skip,
-                          reindex=a.reindex, progress=progress)
+                          reindex=a.reindex, progress=progress, skip_empty_road=a.skip_empty_road)
         for bar in bars.values():
             bar.close()
         for kind in ("plates", "persons"):
@@ -128,6 +128,21 @@ def cmd_remove(a):
         print(f"Removed [{i}] {path}" if path else f"No media [{i}]")
 
 
+def cmd_live(a):
+    from .live import run
+
+    store = Store(a.db)
+    for name, url in (a.add or []):
+        store.add_camera(name, url)
+    cams = store.cameras(enabled_only=True)
+    if not cams:
+        print('No cameras. Add one: python -m targetcapture live --add "Gate" rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101')
+        return
+    print("Recording and indexing: " + ", ".join(c["name"] for c in cams) + ". Stop with Ctrl+C.")
+    run(a.db, root=a.recordings, keep_days=a.keep_days, on_alert=lambda msg, _: print("ALERT", msg),
+        stop_file=a.stop_file)
+
+
 def cmd_media(a):
     store = Store(a.db)
     for m in store.media():
@@ -158,6 +173,9 @@ def main(argv=None):
                         "reader; latin: English plates only (fastest); arabic: Arabic reader for every plate")
     s.add_argument("--no-car-model", action="store_true", help="skip make/model recognition (faster)")
     s.add_argument("--no-motion-skip", action="store_true", help="analyse sampled frames even when nothing moves")
+    s.add_argument("--skip-empty-road", action="store_true",
+                   help="don't look for plates in frames without a detected vehicle (faster on quiet roads; "
+                        "may miss plates on steep top-down views)")
     s.add_argument("--reindex", action="store_true")
     s.set_defaults(fn=cmd_index)
 
@@ -191,6 +209,13 @@ def main(argv=None):
     s.add_argument("ids", nargs="*", type=int)
     s.add_argument("--all", action="store_true", help="remove every video, to start fresh")
     s.set_defaults(fn=cmd_remove)
+
+    s = sub.add_parser("live", help="record live cameras and index them as they record")
+    s.add_argument("--add", nargs=2, action="append", metavar=("NAME", "URL"), help="add a camera first")
+    s.add_argument("--recordings", default="recordings", help="folder for the recorded pieces")
+    s.add_argument("--keep-days", type=float, default=7.0, help="delete recordings older than this")
+    s.add_argument("--stop-file", help="stop when this file appears (used by the web page)")
+    s.set_defaults(fn=cmd_live)
 
     s = sub.add_parser("media", help="list indexed media")
     s.set_defaults(fn=cmd_media)

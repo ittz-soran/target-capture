@@ -85,9 +85,34 @@ Under **Advanced** you can change:
   how sure the match is (high / medium / low), clothing colours, and pictures.
 * Too many wrong people? Move the **Match threshold** slider up. Missing sightings? Move it down a little.
 
+**Find a car** (tab 4)
+* Every vehicle the plate indexing saw is kept, **also when its plate could not be read**.
+* Filter by make/model words (`toyota camry`), type, colour, *plate read / not read*, and a time range
+  (video time `00:10:00`, or DVR clock `2026-09-30 08:00:00` when you gave the clock when indexing).
+* Each result: the vehicle close-up, the whole frame, times, and the plate if one was read on it.
+
+**Watch list**
+* Add wanted plates (wildcards allowed) and wanted people (a face photo), with a note.
+* Every video you index, and every minute of every live camera, is checked automatically. Matches show
+  in the Watch list tab with pictures, and as a red banner at the top of every page (it refreshes itself).
+* Adding an entry also checks the videos that are already indexed.
+
+**Live cameras**
+* Add a camera with its stream address (Hikvision: `rtsp://USER:PASS@IP:554/Streaming/Channels/101`,
+  Dahua: `rtsp://USER:PASS@IP:554/cam/realmonitor?channel=1&subtype=0`) and click **Test connection**.
+* Click **Start live monitoring** (or double-click `run_live_windows.bat`). Each camera is recorded in
+  1-minute pieces in `recordings\<camera>\`, and each piece is indexed as soon as it is finished:
+  plates, people, vehicles and watch-list alerts appear about a minute after they happen.
+* Recordings older than 7 days are deleted automatically, except pieces with a watch-list match.
+* The PC must stay on, and the cameras must be reachable from it (same network, or a VPN).
+
+**Download results:** every search result, a plate opened with **View**, a person from All faces, the
+watch-list matches and the whole All plates list can be downloaded as **Excel** (pictures in the sheet)
+or **PDF**.
+
 ### Step 3: Browse everything
 
-**All faces** (tab 4)
+**All faces**
 * Every face in the video, grouped into people: **#1, #2, #3…**, each with a photo, how many times they were seen,
   and when they first appeared.
 * Click **Show #N** to see every sighting of that person. Click **Close** to go back to the list.
@@ -98,7 +123,7 @@ Under **Advanced** you can change:
 uploads and repaired DVR files), and what you taught in the Teach tab is kept. Command line:
 `python -m targetcapture remove --all`.
 
-**All plates** (tab 5)
+**All plates**
 * **Read plates:** one row per car pass, with times, vehicle, and the words printed on the plate around the
   number (`العراق`, `السليمانية`, `SUL`, `ERB` ...) in **region / plate words**. Type in the filter box
   (e.g. `corolla`, `white toyota`, `Erbil`) to narrow it down. Tick **View** at the end of a row to open that
@@ -106,7 +131,7 @@ uploads and repaired DVR files), and what you taught in the Teach tab is kept. C
 * **Plates that could not be read:** pictures of plates that were found but not read (other alphabets,
   blur, too small). Click **Open** under one to see the whole frame.
 
-### Teach: correct the system (tab 6)
+### Teach: correct the system
 
 Use this when a plate was not read, or was read wrongly.
 
@@ -156,6 +181,10 @@ python -m targetcapture plates --vehicle "white corolla"   # filter by make, mod
 python -m targetcapture find-person suspect1.jpg suspect2.jpg
 
 python -m targetcapture media                        # what is indexed
+
+# 4. Live cameras (also from the web page)
+python -m targetcapture live --add "Gate" rtsp://admin:pass@192.168.1.64:554/Streaming/Channels/101
+python -m targetcapture live                         # record + index all cameras until Ctrl+C
 ```
 
 Each search writes `results/<query>/report.html` (snapshots and details), plus `results.json` and `results.csv`.
@@ -182,6 +211,14 @@ Several videos can go into one index (`--db` picks the file, default `targetcapt
 
 Measured on a 4-core CPU with no GPU: person indexing processed about 8 analysed frames per second on a 768x432 clip with 1 to 3 people in view, and plate indexing took 6 s for a 1-minute 720p clip.
 At those rates a 5-hour busy 1080p street video would take a few hours on CPU; a GPU is typically 5 to 20 times faster. Searching an existing index takes seconds.
+
+Recent speed-ups (same results, less work):
+
+* Models are loaded once and reused for every video in a batch and for every live camera piece.
+* Faces are read only when useful: the first 3 per person, then every 0.6 s or when the person gets clearly bigger. On a busy town clip this halved person indexing time (478 s to 238 s) with identical search results.
+* The car model is worked out once per car (and again only if the car gets much bigger), not on every frame.
+* On an NVIDIA GPU the detectors run in half precision.
+* Optional: `--skip-empty-road` (or the Advanced checkbox "Faster: skip plate reading when no vehicle is in view") skips plate reading on frames with no vehicle. It is much faster on quiet roads but can miss plates on cars the detector does not see, so it is off by default.
 
 ## Run the tests
 

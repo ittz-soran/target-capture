@@ -2,8 +2,11 @@
 
     streamlit run app.py
 """
+import datetime as dt
 import os
 import shutil
+import subprocess
+import sys
 import tempfile
 
 import streamlit as st
@@ -11,8 +14,11 @@ import streamlit as st
 from targetcapture import persons as P
 from targetcapture import plates as L
 from targetcapture import teach as T
+from targetcapture import vehicles as V
+from targetcapture import watch as W
+from targetcapture.export import to_excel, to_pdf
 from targetcapture.pipeline import index_media
-from targetcapture.report import person_report, plate_report, thumbnail
+from targetcapture.report import alert_report, person_report, plate_report, thumbnail, vehicle_report
 from targetcapture.store import Store, clock_time, fmt_offset
 
 UPLOADS = "uploads"
@@ -87,6 +93,21 @@ def show_rows(rows, out_dir, image_keys):
             cols[2].json({k: v for k, v in r.items() if not k.endswith("_image") and v is not None}, expanded=True)
 
 
+def downloads(rows, out_dir, title, key):
+    """Excel and PDF of these results."""
+    if not rows:
+        return
+    c1, c2, _ = st.columns([1, 1, 3])
+    xlsx = to_excel(rows, out_dir, os.path.join(out_dir, "results.xlsx"), title)
+    pdf = to_pdf(rows, out_dir, os.path.join(out_dir, "results.pdf"), title)
+    with open(xlsx, "rb") as f:
+        c1.download_button("Download Excel", f.read(), f"{key}.xlsx", key=f"xl_{key}", on_click="ignore",
+                           icon=":material/table_view:")
+    with open(pdf, "rb") as f:
+        c2.download_button("Download PDF", f.read(), f"{key}.pdf", key=f"pdf_{key}", on_click="ignore",
+                           icon=":material/picture_as_pdf:")
+
+
 def pager(n, key):
     """Page picker for long galleries; returns the slice to show."""
     pages = max(1, (n + PAGE - 1) // PAGE)
@@ -107,9 +128,25 @@ def cached_identities(db, db_mtime, threshold):
     return ppl
 
 
-tab_index, tab_plate, tab_person, tab_faces, tab_all, tab_teach, tab_tips = st.tabs(
-    ["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "All faces", "All plates", "Teach",
-     "Best results"])
+@st.fragment(run_every=15)
+def alert_banner():
+    """New watch-list matches, refreshed every 15 s (live cameras add them while you look)."""
+    new = Store(db_path).alerts(unseen_only=True)
+    seen_before = st.session_state.setdefault("alerts_toasted", set())
+    for a in new:
+        if a["id"] not in seen_before:
+            seen_before.add(a["id"])
+            st.toast(f"Watch list: {a['kind']} {a['value']} found ({a['text']})", icon="🚨")
+    if new:
+        st.error(f"**{len(new)} new watch-list match(es).** Open the **Watch list** tab to see them.",
+                 icon=":material/notifications_active:")
+
+
+alert_banner()
+
+(tab_index, tab_plate, tab_person, tab_car, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
+ tab_tips) = st.tabs(["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
+                      "Watch list", "Live cameras", "All faces", "All plates", "Teach", "Best results"])
 
 with tab_index:
     up = st.file_uploader("Video or image", type=["mp4", "avi", "mkv", "mov", "dav", "h264", "ts",
@@ -128,6 +165,8 @@ with tab_index:
                                                        "arabic": "Arabic / Kurdish only"}[v])
         car_models = st.checkbox("Recognise car make and model (Toyota Corolla, Nissan Altima...)", True)
         vehicle_crops = st.checkbox("Also read plates inside each vehicle (slower; wide or 4K views)")
+        skip_empty = st.checkbox("Faster: skip plate reading when no vehicle is in view (quiet roads; "
+                                 "may miss plates on steep top-down cameras)")
         reindex = st.checkbox("Re-index from scratch")
     if st.button("Start indexing", type="primary", disabled=not (up or path_in)):
         if up:
@@ -147,8 +186,10 @@ with tab_index:
 
         res = index_media(store, path, plates=do_plates, persons=do_persons, plate_fps=plate_fps,
                           person_fps=person_fps, clock_start=clock or None, vehicle_crops=vehicle_crops, plate_script=plate_script, car_models=car_models,
-                          reindex=reindex, progress=progress)
+                          reindex=reindex, progress=progress, skip_empty_road=skip_empty)
         st.success(f"Indexed {os.path.basename(path)}. Now search it in the next tabs.")
+        if res.get("alerts"):
+            st.error(f"{len(res['alerts'])} watch-list match(es) in this video: see the Watch list tab.")
 
 with tab_plate:
     q = st.text_input("Plate number (wildcards allowed: 12?BC* )")
@@ -161,6 +202,7 @@ with tab_plate:
         rows = plate_report(store, q, hits, out)
         st.subheader(f"{len(rows)} sighting(s)")
         st.caption(f"Full report saved to {os.path.join(out, 'report.html')}")
+        downloads(rows, out, f"Plate search {q}", "plate_search")
         show_rows(rows, out, ["plate_image", "second_plate_image"])
 
 with tab_person:
@@ -185,7 +227,152 @@ with tab_person:
         st.subheader(f"Seen {len(rows)} time(s)")
         st.caption(f"{stats.get('faces_indexed', 0)} faces in the index · {stats.get('near_misses', 0)} "
                    f"near misses just below the threshold · report: {os.path.join(out, 'report.html')}")
+        downloads(rows, out, "Person search", "person_search")
         show_rows(rows, out, ["face_image"])
+
+with tab_car:
+    st.caption("Every vehicle the plate indexing saw, also when its plate could not be read. "
+               "Leave a filter empty to ignore it.")
+    c1, c2, c3 = st.columns(3)
+    words = c1.text_input("Make, model or words", placeholder="toyota camry")
+    vtype = c2.selectbox("Type", ["any", "car", "truck", "bus", "motorcycle"])
+    vcolor = c3.selectbox("Colour", ["any", "white", "black", "gray", "red", "blue", "green", "yellow",
+                                     "orange", "brown", "purple"])
+    c4, c5, c6 = st.columns(3)
+    vplate = c4.selectbox("Plate", ["any", "read", "unread"],
+                          format_func=lambda v: {"any": "any", "read": "plate was read",
+                                                 "unread": "plate NOT read"}[v])
+    t_from = c5.text_input("From", placeholder="00:10:00 or 2026-09-30 08:00:00")
+    t_to = c6.text_input("To", placeholder="00:20:00 or 2026-09-30 09:00:00")
+    hide_glimpse = st.checkbox("Hide vehicles seen only for a moment", True)
+    if st.button("Search vehicles", type="primary"):
+        found = V.search(store, words, None if vtype == "any" else vtype, None if vcolor == "any" else vcolor,
+                         vplate, t_from or None, t_to or None, min_seconds=0.9 if hide_glimpse else 0)
+        st.subheader(f"{len(found)} vehicle(s)")
+        if len(found) > 200:
+            st.caption("Showing the first 200: add filters to narrow it down.")
+        out = os.path.join(RESULTS, "vehicle_search")
+        shutil.rmtree(out, ignore_errors=True)
+        rows = vehicle_report(store, found[:200], out)
+        downloads(rows, out, "Vehicle search", "vehicle_search")
+        show_rows(rows, out, ["vehicle_image"])
+
+with tab_watch:
+    st.caption("Wanted plates and people. Every new video and every live-camera minute is checked "
+               "automatically; matches appear here and at the top of the page.")
+    alerts = store.alerts()
+    if alerts:
+        h = st.columns([3, 1, 1])
+        h[0].subheader(f"Matches ({sum(1 for a in alerts if not a['seen'])} new)")
+        if h[1].button("Mark all as seen"):
+            store.mark_alerts_seen()
+            st.rerun()
+        out = os.path.join(RESULTS, "alerts")
+        rows = alert_report(store, alerts[:100], out)
+        with h[2].popover("Download"):
+            downloads(rows, out, "Watch-list matches", "watchlist_matches")
+        show_rows(rows, out, ["plate_image", "face_image"])
+    else:
+        st.info("No matches yet.")
+    st.subheader("Wanted")
+    a1, a2 = st.columns(2)
+    with a1.form("watch_plate", clear_on_submit=True):
+        wp = st.text_input("Plate number (wildcards allowed: 21?45194, 21*)")
+        wn = st.text_input("Note (optional)", key="wp_note")
+        if st.form_submit_button("Add plate") and wp:
+            try:
+                W.add_plate(store, wp, wn)
+                st.success(f"Added {wp}. Checking the videos already indexed…")
+                W.check(store)
+            except ValueError as e:
+                st.error(str(e))
+    with a2.form("watch_face", clear_on_submit=True):
+        wf = st.file_uploader("Photo of the person's face", type=["jpg", "jpeg", "png", "webp"])
+        wfn = st.text_input("Name or note (optional)", key="wf_note")
+        if st.form_submit_button("Add person") and wf:
+            tmp = os.path.join(tempfile.mkdtemp(), wf.name)
+            with open(tmp, "wb") as f:
+                f.write(wf.getbuffer())
+            try:
+                W.add_face(store, tmp, face_model(), wfn)
+                st.success("Added. Checking the videos already indexed…")
+                W.check(store)
+            except ValueError as e:
+                st.error(str(e))
+    for w in store.watchlist():
+        row = st.columns([1, 4, 1])
+        if w["photo"]:
+            row[0].image(w["photo"], width=70)
+        else:
+            row[0].markdown(f"### {w['value']}")
+        row[1].markdown(f"**{w['kind']}: {w['value']}**  \n{w['note'] or ''}")
+        if row[2].button("Remove", key=f"wrm_{w['id']}"):
+            store.remove_watch(w["id"])
+            st.rerun()
+
+with tab_cams:
+    st.caption("Connect DVR / NVR / IP cameras. Each camera is recorded in 1-minute pieces and indexed "
+               "straight away: plates, people, vehicles and watch-list alerts about a minute after "
+               "they happen. Recordings are kept 7 days (pieces with a watch-list match are kept).")
+    stop_file = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live.stop")
+    cams = store.cameras()
+    now = dt.datetime.now()
+    running = any(c["last_seen"] and (now - dt.datetime.fromisoformat(c["last_seen"])).total_seconds() < 90
+                  for c in cams)
+    b1, b2 = st.columns([1, 3])
+    if running:
+        b2.success("Live monitoring is running.")
+        if b1.button("Stop live monitoring"):
+            open(stop_file, "w").close()
+            st.info("Stopping after the minute it is working on…")
+    else:
+        b2.info("Live monitoring is stopped. Start it here, or double-click run_live_windows.bat.")
+        if b1.button("Start live monitoring", type="primary", disabled=not cams):
+            if os.path.exists(stop_file):
+                os.remove(stop_file)
+            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+            subprocess.Popen([sys.executable, "-m", "targetcapture", "--db", db_path, "live",
+                              "--stop-file", stop_file], creationflags=flags,
+                             stdout=open("live.log", "a"), stderr=subprocess.STDOUT)
+            st.success("Starting… the cameras show 'recording' within a minute.")
+    for c in cams:
+        row = st.columns([2, 4, 1, 1])
+        row[0].markdown(f"**{c['name']}**")
+        row[1].caption(f"{c['status'] or 'not started'} · last seen {c['last_seen'] or '-'}")
+        on = row[2].toggle("On", bool(c["enabled"]), key=f"cam_on_{c['id']}")
+        if on != bool(c["enabled"]):
+            store.update_camera(c["id"], enabled=int(on))
+        if row[3].button("Remove", key=f"cam_rm_{c['id']}"):
+            store.remove_camera(c["id"])
+            st.rerun()
+    with st.form("add_cam"):
+        st.markdown("**Add a camera**")
+        cn = st.text_input("Name", placeholder="Front gate")
+        cu = st.text_input("Stream address", placeholder="rtsp://admin:password@192.168.1.64:554/Streaming/Channels/101")
+        st.caption("Hikvision: rtsp://USER:PASS@IP:554/Streaming/Channels/101 (channel 1 main stream, 201 = "
+                   "channel 2) · Dahua: rtsp://USER:PASS@IP:554/cam/realmonitor?channel=1&subtype=0 · "
+                   "Use the main stream for plates.")
+        k1, k2 = st.columns(2)
+        cp = k1.checkbox("Read plates", True, key="cam_p")
+        cpp = k2.checkbox("Find people", True, key="cam_pp")
+        t1, t2 = st.columns(2)
+        test = t1.form_submit_button("Test connection")
+        add = t2.form_submit_button("Add camera", type="primary")
+        if (test or add) and cu:
+            from targetcapture.live import test_camera
+
+            with st.spinner("Connecting…"):
+                ok, msg, jpg = test_camera(cu)
+            if ok:
+                st.image(jpg, caption="Picture from the camera", width=480)
+            else:
+                st.error(f"Could not connect: {msg}")
+            if add and ok and cn:
+                store.add_camera(cn, cu, cp, cpp)
+                st.success(f"Added {cn}.")
+                st.rerun()
+            elif add and not cn:
+                st.error("Give the camera a name.")
 
 with tab_faces:
     st.caption("Every face found in the indexed videos, grouped into people. Click a person to see "
@@ -212,6 +399,7 @@ with tab_faces:
                 st.session_state.face_sel = None
                 st.rerun()
             st.caption(f"Report: {os.path.join(out, 'report.html')}")
+            downloads(rows, out, f"Person #{sel}", f"person_{sel}")
             show_rows(rows, out, ["face_image"])
             st.divider()
     st.subheader(f"{len(people)} people")
@@ -256,7 +444,14 @@ with tab_all:
         out = os.path.join(RESULTS, "plate_view_" + "".join(ch for ch in s["text"] if ch.isalnum()))
         rows = plate_report(store, s["text"], [s], out)
         st.markdown(f"**{s['text']}** · {fmt_offset(s['start'])} to {fmt_offset(s['end'])}")
+        downloads(rows, out, f"Plate {s['text']}", "plate_view")
         show_rows(rows, out, ["plate_image", "second_plate_image"])
+    if sightings and st.button(f"Prepare Excel / PDF of all {len(sightings)} plates"):
+        out = os.path.join(RESULTS, "all_plates")
+        shutil.rmtree(out, ignore_errors=True)
+        with st.spinner("Saving pictures…"):
+            rows = plate_report(store, "all plates", sightings, out)
+        downloads(rows, out, "All plates", "all_plates")
 
     unread = L.group_unread(store.plate_reads(unread=True))
     st.subheader(f"Plates that could not be read ({len(unread)})")

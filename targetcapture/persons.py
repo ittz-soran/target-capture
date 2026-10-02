@@ -22,6 +22,7 @@ import cv2
 import numpy as np
 
 from .colors import dominant_color
+from .gpu import half
 
 log = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class PersonIndexer:
                  face_model="buffalo_l", min_face_score=0.5, track_offset=0):
         from ultralytics import YOLO
 
+        self.person_model = person_model
         self.yolo = YOLO(person_model)
         self.tracker = tracker
         self.face = FaceModel(face_model)
@@ -79,6 +81,30 @@ class PersonIndexer:
         self.min_face_score = min_face_score
         self.track_offset = track_offset
         self._untracked = -1
+        self._face_try: dict[int, tuple] = {}
+        self._faces_seen: dict[int, int] = {}
+
+    def start(self, track_offset: int = 0):
+        """Get ready for a new video: fresh tracker, same (slow to load) face model."""
+        from ultralytics import YOLO
+
+        self.yolo = YOLO(self.person_model)
+        self.track_offset = track_offset
+        self._untracked = -1
+        self._face_try, self._faces_seen = {}, {}
+
+    def _face_due(self, tid: int, t: float, h: int) -> bool:
+        """Look for a face on this person now? Every frame for their first 3 faces, then about
+        every 0.6 s, or sooner when they come clearly closer: the same face frame after frame
+        adds little, and face detection is the slowest step of person indexing."""
+        if tid < 0 or self._faces_seen.get(tid, 0) < 3:
+            self._face_try[tid] = (t, h)
+            return True
+        last_t, last_h = self._face_try.get(tid, (-1e9, 0))
+        if t - last_t >= 0.6 or h >= 1.25 * last_h:
+            self._face_try[tid] = (t, h)
+            return True
+        return False
 
     def _face_in_person(self, img, box):
         x1, y1, x2, y2 = box
@@ -105,7 +131,8 @@ class PersonIndexer:
 
     def process(self, frame) -> list[dict]:
         img = frame.image
-        res = self.yolo.track(img, persist=True, classes=[0], conf=0.35, tracker=self.tracker, verbose=False)[0]
+        res = self.yolo.track(img, persist=True, classes=[0], conf=0.35, tracker=self.tracker, verbose=False,
+                              **half())[0]
         if res.boxes is None or len(res.boxes) == 0:
             return []
         boxes = res.boxes.xyxy.cpu().numpy().astype(int)
@@ -121,8 +148,10 @@ class PersonIndexer:
                    "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2),
                    **_clothing(img, int(x1), int(y1), int(x2), int(y2)),
                    "emb": None}
-            f = self._face_in_person(img, (int(x1), int(y1), int(x2), int(y2)))
+            f = self._face_in_person(img, (int(x1), int(y1), int(x2), int(y2))) \
+                if self._face_due(tid, frame.t, int(y2 - y1)) else None
             if f is not None:
+                self._faces_seen[tid] = self._faces_seen.get(tid, 0) + 1
                 fb, score, emb = f
                 row.update(fx1=fb[0], fy1=fb[1], fx2=fb[2], fy2=fb[3], face_score=score, emb=emb)
             rows.append(row)

@@ -20,6 +20,7 @@ import numpy as np
 
 from .arabic import AR, normalize_chars, to_latin_key
 from .colors import dominant_color
+from .gpu import half
 
 log = logging.getLogger(__name__)
 
@@ -57,7 +58,7 @@ class PlateIndexer:
     def __init__(self, detector_model="yolo-v9-t-384-license-plate-end2end",
                  ocr_model="cct-s-v2-global-model", vehicle_model="yolo11n.pt",
                  min_det_conf=0.4, min_ocr_conf=0.5, min_chars=4, vehicle_crops=False, script="auto",
-                 car_models=True, memory=None):
+                 car_models=True, memory=None, track_offset=0, skip_empty=False):
         from fast_alpr import ALPR
         from ultralytics import YOLO
 
@@ -67,6 +68,11 @@ class PlateIndexer:
                          detector_conf_thresh=min_det_conf, detector_providers=onnx_providers(),
                          ocr_providers=onnx_providers())
         self.vehicles = YOLO(vehicle_model)
+        self.track_offset = track_offset
+        self.skip_empty = skip_empty
+        self._tracker = _BoxTracker(first_id=track_offset)
+        self._tracks: dict[int, dict] = {}   # vehicle track -> make/model found so far, last row saved
+        self.vehicle_rows: list[dict] = []   # every vehicle seen, ~1 row per second per vehicle
         self.min_ocr_conf = min_ocr_conf
         self.min_chars = min_chars
         self.vehicle_crops = vehicle_crops
@@ -91,11 +97,39 @@ class PlateIndexer:
             self.min_arabic_conf = min(min_ocr_conf, 0.3)  # EasyOCR scores run lower than fast-alpr's
 
     def _vehicles(self, img):
-        res = self.vehicles.predict(img, classes=list(VEHICLE_CLASSES), conf=0.3, verbose=False)[0]
-        out = []
-        for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy()):
-            out.append((VEHICLE_CLASSES[int(cls)], [int(v) for v in box]))
-        return out
+        """Vehicles in the frame with a track id each: [(type, [x1, y1, x2, y2], track_id)]."""
+        res = self.vehicles.predict(img, classes=list(VEHICLE_CLASSES), conf=0.3, verbose=False, **half())[0]
+        dets = [(VEHICLE_CLASSES[int(cls)], [int(v) for v in box])
+                for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy())]
+        # drop a box lying mostly inside a bigger one (a second detection of part of the same vehicle)
+        dets.sort(key=lambda d: -(d[1][2] - d[1][0]) * (d[1][3] - d[1][1]))
+        kept = []
+        for vtype, b in dets:
+            area = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+            if all(max(0, min(b[2], k[2]) - max(b[0], k[0])) * max(0, min(b[3], k[3]) - max(b[1], k[1])) / area < 0.8
+                   for _, k in kept):
+                kept.append((vtype, b))
+        return self._tracker.update(kept, self._t)
+
+    def _vehicle_info(self, img, vtype, box, tid) -> dict:
+        """Colour of this sighting; make/model once per vehicle (again only when it comes much
+        closer), not on every frame: the model is the slowest step of plate indexing."""
+        x1, y1, x2, y2 = box
+        body = img[y1 + (y2 - y1) // 6: y1 + (y2 - y1) // 2, x1 + (x2 - x1) // 6: x2 - (x2 - x1) // 6]
+        info = {"vehicle_type": vtype, "vehicle_color": dominant_color(body), "vehicle_model": None,
+                "model_conf": None}
+        if self.models is None or vtype not in ("car", "truck"):
+            return info
+        area = (x2 - x1) * (y2 - y1)
+        tr = self._tracks.setdefault(tid, {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9}) \
+            if tid is not None else {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9}
+        if tr["runs"] == 0 or (area > 1.6 * tr["area"] and tr["runs"] < 3):
+            name, p = self.models.best(img[y1:y2, x1:x2])
+            tr.update(area=area, runs=tr["runs"] + 1)
+            if name and (tr["model"] is None or (p or 0) >= (tr["conf"] or 0) * 0.8):
+                tr.update(model=name, conf=p)
+        info.update(vehicle_model=tr["model"], model_conf=tr["conf"])
+        return info
 
     def _read(self, img, ox=0, oy=0):
         if self.script == "arabic":
@@ -195,13 +229,27 @@ class PlateIndexer:
         img = frame.image
         self._t = frame.t
         self._latin_seen = [e for e in self._latin_seen if frame.t - e[0] <= 1.5]
-        vehicles = None
+        vehicles = self._vehicles(img)
+        infos = {}
+        for vtype, box, tid in vehicles:
+            info = infos[tuple(box)] = self._vehicle_info(img, vtype, box, tid)
+            if tid is None:
+                continue
+            tr = self._tracks.setdefault(tid, {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9})
+            if frame.t - tr["saved"] >= 1.0:  # about one row per second per vehicle is enough
+                tr["saved"] = frame.t
+                self.vehicle_rows.append({"frame": frame.index, "t": frame.t, "track_id": tid,
+                                          "x1": box[0], "y1": box[1], "x2": box[2], "y2": box[3], **info})
+        # Optional: no vehicle in view, skip the plate reader (faster on long recordings of mostly
+        # empty road; off by default because the vehicle detector misses some views that the plate
+        # detector handles, e.g. steep top-down cameras). Single photos are always read.
+        if not vehicles and frame.index > 0 and self.skip_empty:
+            return []
         reads = self._read(img)
         if self.vehicle_crops:
             # Two-stage: also read plates inside each vehicle crop. Helps on wide,
             # high-resolution views where plates are tiny relative to the frame.
-            vehicles = self._vehicles(img)
-            for _, (x1, y1, x2, y2) in vehicles:
+            for _, (x1, y1, x2, y2), _ in vehicles:
                 for r in self._read(img[y1:y2, x1:x2], x1, y1):
                     if not any(_iou(r, o) > 0.3 for o in reads):
                         reads.append(r)
@@ -210,28 +258,68 @@ class PlateIndexer:
         if self.memory:
             for r in reads:
                 self.memory.apply(r, img)
-        if vehicles is None:
-            vehicles = self._vehicles(img)
         for r in reads:
             r.update(frame=frame.index, t=frame.t, vehicle_type=None, vehicle_color=None,
                      vx1=None, vy1=None, vx2=None, vy2=None)
             cx, cy = (r["x1"] + r["x2"]) / 2, (r["y1"] + r["y2"]) / 2
             best = None
-            for vtype, (x1, y1, x2, y2) in vehicles:
+            for vtype, (x1, y1, x2, y2), _ in vehicles:
                 if x1 <= cx <= x2 and y1 <= cy <= y2:
                     area = (x2 - x1) * (y2 - y1)
                     if best is None or area < best[0]:
-                        best = (area, vtype, (x1, y1, x2, y2))
+                        best = (area, (x1, y1, x2, y2))
             if best:
-                _, vtype, (x1, y1, x2, y2) = best
-                # Colour from the upper body of the vehicle, avoiding road and plate.
-                body = img[y1 + (y2 - y1) // 6: y1 + (y2 - y1) // 2, x1 + (x2 - x1) // 6: x2 - (x2 - x1) // 6]
-                r.update(vehicle_type=vtype, vehicle_color=dominant_color(body),
-                         vx1=x1, vy1=y1, vx2=x2, vy2=y2)
-                if self.models is not None and vtype in ("car", "truck"):
-                    name, p = self.models.best(img[y1:y2, x1:x2])
-                    r.update(vehicle_model=name, model_conf=p if name else None)
+                _, (x1, y1, x2, y2) = best
+                r.update(vx1=x1, vy1=y1, vx2=x2, vy2=y2, **infos[(x1, y1, x2, y2)])
         return reads
+
+    def start(self, memory=None, track_offset: int = 0, skip_empty: bool = False):
+        """Get ready for a new video, keeping the loaded models (loading them takes seconds)."""
+        self.memory = memory
+        self.skip_empty = skip_empty
+        self.track_offset = track_offset
+        self._tracker = _BoxTracker(first_id=track_offset)
+        self._tracks, self.vehicle_rows = {}, []
+        self._t, self._latin_seen = 0.0, []
+
+    def drain_vehicles(self) -> list[dict]:
+        rows, self.vehicle_rows = self.vehicle_rows, []
+        return rows
+
+
+class _BoxTracker:
+    """Gives each vehicle a track id across sampled frames. Matches a box to the nearest box of
+    the same type seen in the last 2 s (centre within about one vehicle width, similar size);
+    simple, and unlike ByteTrack it never drops a detection when frames are far apart."""
+
+    def __init__(self, first_id: int = 0, max_gap: float = 2.0):
+        self.next_id, self.max_gap = first_id, max_gap
+        self.live: dict[int, tuple] = {}  # id -> (type, box, t)
+
+    def update(self, dets: list[tuple], t: float) -> list[tuple]:
+        self.live = {i: v for i, v in self.live.items() if t - v[2] <= self.max_gap}
+        pairs = []
+        for d, (vtype, b) in enumerate(dets):
+            w, h = b[2] - b[0], b[3] - b[1]
+            for i, (ltype, lb, lt) in self.live.items():
+                lw, lh = lb[2] - lb[0], lb[3] - lb[1]
+                dist = np.hypot((b[0] + b[2] - lb[0] - lb[2]) / 2, (b[1] + b[3] - lb[1] - lb[3]) / 2)
+                size = max(w * h, lw * lh) / max(1, min(w * h, lw * lh))
+                if ltype == vtype and dist <= 1.2 * max(w, lw) and size <= 3:
+                    pairs.append((dist / max(w, lw), d, i))
+        used_d, used_i, ids = set(), set(), {}
+        for _, d, i in sorted(pairs):
+            if d not in used_d and i not in used_i:
+                used_d.add(d), used_i.add(i)
+                ids[d] = i
+        out = []
+        for d, (vtype, b) in enumerate(dets):
+            if d not in ids:
+                ids[d] = self.next_id
+                self.next_id += 1
+            self.live[ids[d]] = (vtype, b, t)
+            out.append((vtype, b, ids[d]))
+        return out
 
 
 def _iou(a, b):

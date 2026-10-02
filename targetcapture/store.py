@@ -48,6 +48,39 @@ CREATE TABLE IF NOT EXISTS frame_sigs (   -- 48x27 grey thumbnail of each frame 
     media_id INTEGER, frame INTEGER, sig BLOB,   -- (finds the exact frame again in videos that seek badly)
     PRIMARY KEY (media_id, frame)
 );
+CREATE TABLE IF NOT EXISTS vehicle_dets (   -- every vehicle seen (also without a readable plate)
+    id INTEGER PRIMARY KEY,
+    media_id INTEGER NOT NULL, frame INTEGER, t REAL, track_id INTEGER,
+    x1 INTEGER, y1 INTEGER, x2 INTEGER, y2 INTEGER,
+    vehicle_type TEXT, vehicle_color TEXT, vehicle_model TEXT, model_conf REAL
+);
+CREATE INDEX IF NOT EXISTS vehicle_dets_media_track ON vehicle_dets(media_id, track_id);
+CREATE TABLE IF NOT EXISTS watchlist (      -- wanted plates and faces, checked on every indexed video
+    id INTEGER PRIMARY KEY,
+    kind TEXT NOT NULL,          -- 'plate' or 'face'
+    value TEXT,                  -- plate text (wildcards allowed) or the photo's file name
+    note TEXT,
+    emb BLOB,                    -- face: 512-d ArcFace embedding
+    photo BLOB,                  -- face: small JPEG for the page
+    active INTEGER DEFAULT 1,
+    created TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS alerts (
+    id INTEGER PRIMARY KEY,
+    watch_id INTEGER, media_id INTEGER, start REAL, end REAL,
+    text TEXT,                   -- what was matched: plate read, or face similarity
+    score REAL,
+    frame INTEGER, x1 INTEGER, y1 INTEGER, x2 INTEGER, y2 INTEGER,
+    seen INTEGER DEFAULT 0,
+    created TEXT DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (watch_id, media_id, start)
+);
+CREATE TABLE IF NOT EXISTS cameras (        -- live cameras (RTSP), recorded in segments and indexed
+    id INTEGER PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL, url TEXT NOT NULL,
+    plates INTEGER DEFAULT 1, persons INTEGER DEFAULT 1, enabled INTEGER DEFAULT 1,
+    status TEXT, last_seen TEXT
+);
 CREATE TABLE IF NOT EXISTS person_dets (
     id INTEGER PRIMARY KEY,
     media_id INTEGER NOT NULL REFERENCES media(id),
@@ -98,7 +131,7 @@ class Store:
         """Forget a video: its plates, people and frame pictures. Corrections typed in the Teach
         tab are kept (they still fix the same reading mistakes in other videos)."""
         row = self.media(media_id)
-        for table in ("plate_reads", "person_dets", "frame_sigs"):
+        for table in ("plate_reads", "person_dets", "frame_sigs", "vehicle_dets", "alerts"):
             self.db.execute(f"DELETE FROM {table} WHERE media_id=?", (media_id,))
         self.db.execute("UPDATE plate_labels SET media_id=NULL WHERE media_id=?", (media_id,))
         self.db.execute("DELETE FROM media WHERE id=?", (media_id,))
@@ -114,11 +147,13 @@ class Store:
         self.db.commit()
 
     def reset(self, media_id: int, kind: str):
-        table = "plate_reads" if kind == "plates" else "person_dets"
-        self.db.execute(f"DELETE FROM {table} WHERE media_id=?", (media_id,))
+        tables = ("plate_reads", "vehicle_dets") if kind == "plates" else ("person_dets",)
+        for table in tables:
+            self.db.execute(f"DELETE FROM {table} WHERE media_id=?", (media_id,))
         self.db.execute("""DELETE FROM frame_sigs WHERE media_id=? AND frame NOT IN
                            (SELECT frame FROM plate_reads WHERE media_id=? UNION
-                            SELECT frame FROM person_dets WHERE media_id=?)""", (media_id,) * 3)
+                            SELECT frame FROM vehicle_dets WHERE media_id=? UNION
+                            SELECT frame FROM person_dets WHERE media_id=?)""", (media_id,) * 4)
         self.set_progress(media_id, kind, 0, False)
 
     # ---- frames ------------------------------------------------------------
@@ -182,6 +217,77 @@ class Store:
 
     def labels(self):
         return self.db.execute("SELECT * FROM plate_labels ORDER BY id").fetchall()
+
+    # ---- vehicles ----------------------------------------------------------
+    def add_vehicle_dets(self, media_id: int, rows: list[dict]):
+        self.db.executemany(
+            """INSERT INTO vehicle_dets(media_id, frame, t, track_id, x1, y1, x2, y2, vehicle_type,
+               vehicle_color, vehicle_model, model_conf) VALUES (:media_id, :frame, :t, :track_id,
+               :x1, :y1, :x2, :y2, :vehicle_type, :vehicle_color, :vehicle_model, :model_conf)""",
+            [{"media_id": media_id, "vehicle_model": None, "model_conf": None, **r} for r in rows])
+
+    def vehicle_rows(self, media_id: int | None = None):
+        q, args = "SELECT * FROM vehicle_dets", ()
+        if media_id is not None:
+            q, args = q + " WHERE media_id=?", (media_id,)
+        return self.db.execute(q + " ORDER BY media_id, track_id, t", args).fetchall()
+
+    def max_vehicle_track(self, media_id: int) -> int:
+        row = self.db.execute("SELECT MAX(track_id) m FROM vehicle_dets WHERE media_id=?", (media_id,)).fetchone()
+        return row["m"] or 0
+
+    # ---- watch list and alerts ----------------------------------------------
+    def add_watch(self, kind: str, value: str, note: str = "", emb=None, photo: bytes | None = None) -> int:
+        cur = self.db.execute("INSERT INTO watchlist(kind, value, note, emb, photo) VALUES (?,?,?,?,?)",
+                              (kind, value, note, None if emb is None else np.asarray(emb, np.float32).tobytes(),
+                               photo))
+        self.db.commit()
+        return cur.lastrowid
+
+    def watchlist(self, active_only: bool = False):
+        q = "SELECT * FROM watchlist" + (" WHERE active=1" if active_only else "") + " ORDER BY id"
+        return self.db.execute(q).fetchall()
+
+    def remove_watch(self, watch_id: int):
+        self.db.execute("DELETE FROM alerts WHERE watch_id=?", (watch_id,))
+        self.db.execute("DELETE FROM watchlist WHERE id=?", (watch_id,))
+        self.db.commit()
+
+    def add_alert(self, a: dict) -> bool:
+        """True if this is a new alert (the same match is only alerted once)."""
+        cur = self.db.execute(
+            """INSERT OR IGNORE INTO alerts(watch_id, media_id, start, end, text, score, frame, x1, y1, x2, y2)
+               VALUES (:watch_id, :media_id, :start, :end, :text, :score, :frame, :x1, :y1, :x2, :y2)""", a)
+        self.db.commit()
+        return cur.rowcount > 0
+
+    def alerts(self, unseen_only: bool = False):
+        q = """SELECT a.*, w.kind, w.value, w.note FROM alerts a JOIN watchlist w ON w.id = a.watch_id"""
+        return self.db.execute(q + (" WHERE a.seen=0" if unseen_only else "") + " ORDER BY a.id DESC").fetchall()
+
+    def mark_alerts_seen(self):
+        self.db.execute("UPDATE alerts SET seen=1")
+        self.db.commit()
+
+    # ---- cameras -----------------------------------------------------------
+    def add_camera(self, name: str, url: str, plates: bool = True, persons: bool = True) -> int:
+        cur = self.db.execute("INSERT INTO cameras(name, url, plates, persons) VALUES (?,?,?,?)",
+                              (name, url, int(plates), int(persons)))
+        self.db.commit()
+        return cur.lastrowid
+
+    def cameras(self, enabled_only: bool = False):
+        q = "SELECT * FROM cameras" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY id"
+        return self.db.execute(q).fetchall()
+
+    def update_camera(self, cam_id: int, **fields):
+        sets = ", ".join(f"{k}=?" for k in fields)
+        self.db.execute(f"UPDATE cameras SET {sets} WHERE id=?", (*fields.values(), cam_id))
+        self.db.commit()
+
+    def remove_camera(self, cam_id: int):
+        self.db.execute("DELETE FROM cameras WHERE id=?", (cam_id,))
+        self.db.commit()
 
     # ---- persons -----------------------------------------------------------
     def max_track_id(self, media_id: int) -> int:

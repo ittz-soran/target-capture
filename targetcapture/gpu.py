@@ -24,6 +24,11 @@ def torch_cuda() -> bool:
         return False
 
 
+def half() -> dict:
+    """YOLO options: half precision on an NVIDIA card (about twice as fast), nothing on CPU."""
+    return {"half": True} if torch_cuda() else {}
+
+
 @functools.lru_cache(maxsize=None)
 def onnx_providers() -> list[str]:
     try:

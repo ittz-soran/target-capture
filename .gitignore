@@ -11,3 +11,5 @@ target-capture.zip
 *.mkv
 *.dav
 fixed_videos/
+runs/
+/yolo*.pt

@@ -95,6 +95,15 @@ class PlateIndexer:
 
             self.arabic = ArabicPlateOCR()
             self.min_arabic_conf = min(min_ocr_conf, 0.3)  # EasyOCR scores run lower than fast-alpr's
+        # Second reader trained on Iraqi plates: reads two-line plates the general reader gets wrong
+        self.iraq = None
+        if script == "auto":
+            try:
+                from .plateocr import PlateOCR
+
+                self.iraq = PlateOCR(providers=onnx_providers())
+            except Exception as e:  # model file missing or onnxruntime problem: general reader only
+                log.warning("Iraqi plate reader not loaded: %s", e)
 
     def _vehicles(self, img):
         """Vehicles in the frame with a track id each: [(type, [x1, y1, x2, y2], track_id)]."""
@@ -143,6 +152,8 @@ class PlateIndexer:
             conf = float(np.mean(conf)) if isinstance(conf, (list, tuple, np.ndarray)) else float(conf or 0)
             b = r.detection.bounding_box
             box = {"x1": b.x1 + ox, "y1": b.y1 + oy, "x2": b.x2 + ox, "y2": b.y2 + oy}
+            if self.iraq is not None:
+                text, conf = self._iraq_pick(img, b, text, conf)
             if len(text) < self.min_chars or conf < self.min_ocr_conf:
                 # Detected but not readable (e.g. a non-Latin plate, blur, too small): keep the
                 # capture so it can be checked by eye.
@@ -174,6 +185,21 @@ class PlateIndexer:
                     region = seen or region
             reads.append({"text": text, "conf": conf, "region": region, **box})
         return reads
+
+    def _iraq_pick(self, img, b, text: str, conf: float, sure: float = 0.8) -> tuple[str, float]:
+        """General read vs the Iraqi reader. The Iraqi one wins on a sure two-line plate the general
+        reader garbled ("21K519K" for 21 K 45194), or when the general read is too weak to use.
+        Single-line reads stay with the general reader, which is better there and on foreign plates."""
+        from .plateocr import plausible
+
+        iq, iq_conf, layout = self.iraq.read(self._plate_crop(img, b))
+        if not iq or iq_conf < sure or not plausible(iq) or len(iq) < self.min_chars:
+            return text, conf
+        general = strip_codes(text)[0].replace(" ", "")
+        if (conf < self.min_ocr_conf or len(text) < self.min_chars
+                or (layout == "two-line" and not plausible(general))):
+            return iq, iq_conf
+        return text, conf
 
     def _plate_crop(self, img, b):
         x1, y1, x2, y2 = max(b.x1, 0), max(b.y1, 0), min(b.x2, img.shape[1]), min(b.y2, img.shape[0])

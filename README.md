@@ -152,6 +152,15 @@ What the system does with your answers:
   as pictures plus `labels.csv`. With a few hundred of them, the plate reader itself can be retrained on your
   cameras' plates, which is the real long-term accuracy gain.
 
+A second plate reader trained on Iraqi plates (`targetcapture/models/iraq_plate_ocr.onnx`) runs next to the general one.
+It takes over on two-line plates the general reader garbles, and when the general read is too weak; single-line and
+foreign plates stay with the general reader. To retrain it on your own corrected plates (needs the CPU or GPU for an hour or so):
+
+```bat
+.venv\Scripts\python -m targetcapture export-taught taught
+.venv\Scripts\python tools\train_plate_ocr.py --resume targetcapture\models\iraq_plate_ocr.pt --real taught --minutes 60
+```
+
 ### Best results tab
 
 The **Best results** tab (also in `TIPS.md`) explains how to get the most out of your cameras, settings and searches.

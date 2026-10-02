@@ -27,22 +27,34 @@ def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float
     add = store.add_plate_reads if kind == "plates" else store.add_person_dets
     found, last_commit = 0, time.time()
     pending: list[dict] = []
-    for frame in iter_frames(info.path, fps, start_frame=start, motion_skip=motion_skip):
-        rows = indexer.process(frame)
-        vehicles = indexer.drain_vehicles() if hasattr(indexer, "drain_vehicles") else []
-        if vehicles:
-            store.add_vehicle_dets(media_id, vehicles)
-        if (rows or vehicles) and info.kind == "video":
-            store.add_frame_sig(media_id, frame.index, frame_signature(frame.image))
-        pending += rows
-        found += len(rows)
-        if progress:
-            progress(kind, frame.index + 1, total, found, frame.t)
-        if time.time() - last_commit > 10:
+    next_frame = start
+    try:
+        for frame in iter_frames(info.path, fps, start_frame=start, motion_skip=motion_skip):
+            rows = indexer.process(frame)
+            vehicles = indexer.drain_vehicles() if hasattr(indexer, "drain_vehicles") else []
+            if vehicles:
+                store.add_vehicle_dets(media_id, vehicles)
+            if (rows or vehicles) and info.kind == "video":
+                store.add_frame_sig(media_id, frame.index, frame_signature(frame.image))
+            pending += rows
+            found += len(rows)
+            next_frame = frame.index + 1
+            if time.time() - last_commit > 10:
+                add(media_id, pending)
+                pending = []
+                store.set_progress(media_id, kind, next_frame)  # commits; safe to stop and resume
+                last_commit = time.time()
+            if progress:
+                progress(kind, frame.index + 1, total, found, frame.t)
+    except BaseException:
+        # Stopped (Stop button, Ctrl+C) or failed: keep everything found so far and release the
+        # database, so the next run can search it and continue from here.
+        try:
             add(media_id, pending)
-            pending = []
-            store.set_progress(media_id, kind, frame.index + 1)  # commits; safe to stop and resume
-            last_commit = time.time()
+            store.set_progress(media_id, kind, next_frame)
+        except Exception:
+            store.db.rollback()
+        raise
     add(media_id, pending)
     store.set_progress(media_id, kind, total, done=True)
     if progress:

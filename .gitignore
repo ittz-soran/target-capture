@@ -13,3 +13,5 @@ target-capture.zip
 fixed_videos/
 runs/
 /yolo*.pt
+*.db-wal
+*.db-shm

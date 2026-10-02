@@ -98,7 +98,9 @@ CREATE INDEX IF NOT EXISTS person_dets_media_track ON person_dets(media_id, trac
 class Store:
     def __init__(self, path: str):
         self.path = path
-        self.db = sqlite3.connect(path)
+        # timeout: wait for another run (e.g. live cameras) to finish writing instead of failing
+        self.db = sqlite3.connect(path, timeout=60)
+        self.db.execute("PRAGMA journal_mode=WAL")  # searches can read while indexing writes
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(plate_reads)")}

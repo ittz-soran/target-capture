@@ -156,10 +156,10 @@ def person_report(store, query_paths, sightings, stats, threshold, out_dir):
 
 
 def _write(out_dir, rows, title, summary):
-    with open(os.path.join(out_dir, "results.json"), "w") as f:
+    with open(os.path.join(out_dir, "results.json"), "w", encoding="utf-8") as f:
         json.dump(rows, f, indent=2, default=str)
     if rows:
-        with open(os.path.join(out_dir, "results.csv"), "w", newline="") as f:
+        with open(os.path.join(out_dir, "results.csv"), "w", newline="", encoding="utf-8-sig") as f:
             w = csv.DictWriter(f, fieldnames=list(rows[0].keys()))
             w.writeheader()
             for r in rows:
@@ -177,7 +177,7 @@ section{{background:#fff;border:1px solid #ddd;border-radius:8px;padding:12px;ma
 .imgs{{display:flex;gap:8px;flex-wrap:wrap}}.imgs img{{max-width:100%;max-height:360px;border-radius:4px}}
 th{{text-align:left;padding-right:12px;color:#666;font-weight:normal}}h2{{margin:0 0 8px}}</style></head>
 <body><h1>{html.escape(title)}</h1><p>{summary}</p>{''.join(cards) or '<p>No matches.</p>'}</body></html>"""
-    with open(os.path.join(out_dir, "report.html"), "w") as f:
+    with open(os.path.join(out_dir, "report.html"), "w", encoding="utf-8") as f:
         f.write(page)
 
 

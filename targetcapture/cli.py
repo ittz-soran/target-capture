@@ -153,6 +153,10 @@ def cmd_media(a):
 
 
 def main(argv=None):
+    # Windows consoles and log files default to a code page without Arabic: print plate text safely
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
     p = argparse.ArgumentParser(prog="targetcapture", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--db", default="targetcapture.db", help="index database (default: %(default)s)")

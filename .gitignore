@@ -15,3 +15,4 @@ runs/
 /yolo*.pt
 *.db-wal
 *.db-shm
+settings.json

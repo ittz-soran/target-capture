@@ -217,7 +217,7 @@ def main(argv=None):
     s = sub.add_parser("live", help="record live cameras and index them as they record")
     s.add_argument("--add", nargs=2, action="append", metavar=("NAME", "URL"), help="add a camera first")
     s.add_argument("--recordings", default="recordings", help="folder for the recorded pieces")
-    s.add_argument("--keep-days", type=float, default=7.0, help="delete recordings older than this")
+    s.add_argument("--keep-days", type=float, help="delete recordings older than this (default: Settings tab, 7)")
     s.add_argument("--stop-file", help="stop when this file appears (used by the web page)")
     s.set_defaults(fn=cmd_live)
 

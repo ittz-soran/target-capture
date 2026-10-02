@@ -1,5 +1,5 @@
 """Target Capture: index long videos once, then search them for plates or people."""
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Footage is sensitive: keep Ultralytics from sending usage analytics.
 try:

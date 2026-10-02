@@ -12,6 +12,7 @@ import tempfile
 import streamlit as st
 
 from targetcapture import persons as P
+from targetcapture import settings as C
 from targetcapture import plates as L
 from targetcapture import teach as T
 from targetcapture import vehicles as V
@@ -24,11 +25,14 @@ from targetcapture.store import Store, clock_time, fmt_offset
 UPLOADS = "uploads"
 RESULTS = "results"
 THUMBS = os.path.join(RESULTS, "_thumbs")
-PAGE = 36
+CFG = C.load()
+PAGE = int(CFG["page_size"])
+SCRIPTS = ["auto", "latin", "arabic"]
+APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(page_title="Target Capture", layout="wide")
 st.title("Target Capture")
-db_path = st.sidebar.text_input("Index database", "targetcapture.db")
+db_path = st.sidebar.text_input("Index database", CFG["db_path"])
 store = Store(db_path)
 
 def remove_media(media_id):
@@ -45,6 +49,11 @@ def remove_media(media_id):
 
 
 @st.cache_resource
+def app_version():
+    return C.version()
+
+
+@st.cache_resource
 def device_line():
     from targetcapture.gpu import describe
 
@@ -53,6 +62,7 @@ def device_line():
 
 with st.sidebar:
     st.caption(device_line())
+    st.caption(f"Version {C.__version__}" + (f" · {app_version()['date']}" if app_version()["date"] else ""))
     st.subheader("Indexed media")
     for m in store.media():
         dur = fmt_offset(m["frames"] / m["fps"]) if m["kind"] == "video" else "image"
@@ -150,28 +160,29 @@ def alert_banner():
 alert_banner()
 
 (tab_index, tab_plate, tab_person, tab_car, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
- tab_tips) = st.tabs(["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
-                      "Watch list", "Live cameras", "All faces", "All plates", "Teach", "Best results"])
+ tab_tips, tab_settings) = st.tabs(["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
+                      "Watch list", "Live cameras", "All faces", "All plates", "Teach", "Best results", "Settings"])
 
 with tab_index:
     up = st.file_uploader("Video or image", type=["mp4", "avi", "mkv", "mov", "dav", "h264", "ts",
                                                   "jpg", "jpeg", "png", "bmp", "webp"])
     path_in = st.text_input("…or a path to a file already on this machine (best for multi-hour DVR files)")
     c1, c2, c3 = st.columns(3)
-    do_plates = c1.checkbox("Read plates", True)
-    do_persons = c2.checkbox("Find people", True)
+    do_plates = c1.checkbox("Read plates", CFG["read_plates"])
+    do_persons = c2.checkbox("Find people", CFG["find_people"])
     clock = c3.text_input("DVR clock at first frame (optional)", placeholder="2026-09-30 08:00:00")
     with st.expander("Advanced"):
-        plate_fps = st.slider("Frames per second analysed for plates", 1.0, 10.0, 4.0)
-        person_fps = st.slider("Frames per second analysed for people", 1.0, 10.0, 3.0)
-        plate_script = st.radio("Plate script", ["auto", "latin", "arabic"], horizontal=True,
+        plate_fps = st.slider("Frames per second analysed for plates", 1.0, 10.0, float(CFG["plate_fps"]))
+        person_fps = st.slider("Frames per second analysed for people", 1.0, 10.0, float(CFG["person_fps"]))
+        plate_script = st.radio("Plate script", SCRIPTS, horizontal=True, index=SCRIPTS.index(CFG["plate_script"]),
                                 format_func=lambda v: {"auto": "Auto (English and Arabic)",
                                                        "latin": "English only (fastest)",
                                                        "arabic": "Arabic / Kurdish only"}[v])
-        car_models = st.checkbox("Recognise car make and model (Toyota Corolla, Nissan Altima...)", True)
-        vehicle_crops = st.checkbox("Also read plates inside each vehicle (slower; wide or 4K views)")
+        car_models = st.checkbox("Recognise car make and model (Toyota Corolla, Nissan Altima...)", CFG["car_models"])
+        vehicle_crops = st.checkbox("Also read plates inside each vehicle (slower; wide or 4K views)",
+                                    CFG["vehicle_crops"])
         skip_empty = st.checkbox("Faster: skip plate reading when no vehicle is in view (quiet roads; "
-                                 "may miss plates on steep top-down cameras)")
+                                 "may miss plates on steep top-down cameras)", CFG["skip_empty_road"])
         reindex = st.checkbox("Re-index from scratch")
     if st.button("Start indexing", type="primary", disabled=not (up or path_in)):
         if up:
@@ -191,7 +202,8 @@ with tab_index:
 
         res = index_media(store, path, plates=do_plates, persons=do_persons, plate_fps=plate_fps,
                           person_fps=person_fps, clock_start=clock or None, vehicle_crops=vehicle_crops, plate_script=plate_script, car_models=car_models,
-                          reindex=reindex, progress=progress, skip_empty_road=skip_empty)
+                          reindex=reindex, progress=progress, skip_empty_road=skip_empty,
+                          min_ocr_conf=CFG["min_ocr_conf"])
         st.success(f"Indexed {os.path.basename(path)}. Now search it in the next tabs.")
         if res.get("alerts"):
             st.error(f"{len(res['alerts'])} watch-list match(es) in this video: see the Watch list tab.")
@@ -199,7 +211,7 @@ with tab_index:
 with tab_plate:
     q = st.text_input("Plate number (wildcards allowed: 12?BC* )")
     c1, c2 = st.columns(2)
-    max_dist = c1.number_input("Allowed character differences", 0, 3, 1)
+    max_dist = c1.number_input("Allowed character differences", 0, 3, int(CFG["plate_max_dist"]))
     min_reads = c2.number_input("Minimum reads per sighting", 1, 10, 1)
     if st.button("Search plate", disabled=not q):
         hits = L.search(store, q, max_dist=max_dist, min_reads=min_reads)
@@ -318,7 +330,8 @@ with tab_watch:
 with tab_cams:
     st.caption("Connect DVR / NVR / IP cameras. Each camera is recorded in 1-minute pieces and indexed "
                "straight away: plates, people, vehicles and watch-list alerts about a minute after "
-               "they happen. Recordings are kept 7 days (pieces with a watch-list match are kept).")
+               f"they happen. Recordings are kept {CFG['keep_days']:g} days (pieces with a watch-list match are "
+               "kept); change this in Settings.")
     stop_file = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live.stop")
     cams = store.cameras()
     now = dt.datetime.now()
@@ -593,3 +606,134 @@ with tab_teach:
 
 with tab_tips:
     st.markdown(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TIPS.md"), encoding="utf-8").read())
+
+def folder_size(path):
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def start_update():
+    """Run the updater in its own window from a copy (the update replaces update_windows.bat),
+    then close this web page so its files can be replaced; the updater starts it again."""
+    copy = os.path.join(tempfile.gettempdir(), "target_capture_update.bat")
+    shutil.copyfile(os.path.join(APP_DIR, "update_windows.bat"), copy)
+    subprocess.Popen([copy, "restart", APP_DIR], cwd=APP_DIR, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    import threading
+
+    threading.Timer(2.0, os._exit, [0]).start()
+
+
+with tab_settings:
+    v = app_version()
+    st.subheader("Version")
+    st.markdown(f"**Target Capture {v['version']}**" +
+                (f"  \nInstalled update: {v['date']} ({v['commit']}) · {v['subject']}" if v["commit"] else
+                 "  \nThis folder is not linked to GitHub yet (run update_windows.bat once)."))
+    if st.button("Check for updates", icon=":material/sync:"):
+        with st.spinner("Asking GitHub…"):
+            st.session_state["update_check"] = C.check_update()
+    chk = st.session_state.get("update_check")
+    if chk:
+        if not chk["ok"]:
+            st.error(chk["error"])
+        elif not chk["changes"]:
+            st.success("You have the latest version.")
+        else:
+            st.info(f"{len(chk['changes'])} update(s) available:")
+            st.markdown("\n".join(f"* {d}: {msg}" for d, msg in chk["changes"]))
+            if os.name == "nt":
+                live_on = any(c["last_seen"] and (dt.datetime.now() - dt.datetime.fromisoformat(c["last_seen"]))
+                              .total_seconds() < 90 for c in store.cameras())
+                if live_on:
+                    st.warning("Stop live monitoring (Live cameras tab) before updating.")
+                if st.button("Update now", type="primary", disabled=live_on):
+                    st.warning("Updating in a new window. This page closes now and opens again when the "
+                               "update is done (a minute or two; longer when new libraries are needed).")
+                    start_update()
+            else:
+                st.code("git pull && pip install -r requirements.txt", language="bash")
+
+    st.subheader("Defaults")
+    st.caption("Saved in settings.json. Updates keep it. Used by new indexing runs, searches and live cameras.")
+    with st.form("settings"):
+        st.markdown("**Indexing**")
+        c1, c2, c3 = st.columns(3)
+        n = {}
+        n["read_plates"] = c1.checkbox("Read plates", CFG["read_plates"])
+        n["find_people"] = c2.checkbox("Find people", CFG["find_people"])
+        n["car_models"] = c3.checkbox("Car make and model", CFG["car_models"])
+        n["plate_fps"] = c1.slider("Frames per second for plates", 1.0, 10.0, float(CFG["plate_fps"]),
+                                   help="Higher reads more plates on fast cars but is slower.")
+        n["person_fps"] = c2.slider("Frames per second for people", 1.0, 10.0, float(CFG["person_fps"]))
+        n["min_ocr_conf"] = c3.slider("Minimum plate read confidence", 0.2, 0.9, float(CFG["min_ocr_conf"]), 0.05,
+                                      help="Lower keeps more (and more wrong) reads.")
+        n["plate_script"] = c1.radio("Plate script", SCRIPTS, index=SCRIPTS.index(CFG["plate_script"]),
+                                     format_func={"auto": "Auto (English and Arabic)", "latin": "English only",
+                                                  "arabic": "Arabic / Kurdish only"}.get)
+        n["vehicle_crops"] = c2.checkbox("Read plates inside each vehicle (slower)", CFG["vehicle_crops"])
+        n["skip_empty_road"] = c2.checkbox("Skip plate reading when no vehicle is in view", CFG["skip_empty_road"])
+        st.markdown("**Searching and watch list**")
+        c1, c2, c3, c4 = st.columns(4)
+        n["plate_max_dist"] = c1.number_input("Plate search: allowed differences", 0, 3, int(CFG["plate_max_dist"]))
+        n["watch_plate_dist"] = c2.number_input("Watch list: plate differences", 0, 3, int(CFG["watch_plate_dist"]))
+        n["face_threshold"] = c3.slider("Watch list: face match strictness", 0.3, 0.7, float(CFG["face_threshold"]),
+                                        0.01, help="Higher means fewer, surer matches.")
+        n["page_size"] = c4.number_input("Pictures per page", 12, 120, int(CFG["page_size"]), 12)
+        st.markdown("**Live cameras**")
+        c1, c2 = st.columns(2)
+        n["keep_days"] = c1.number_input("Keep recordings (days)", 1.0, 365.0, float(CFG["keep_days"]), 1.0)
+        n["segment_seconds"] = c2.number_input("Recorded piece length (seconds)", 30, 600,
+                                               int(CFG["segment_seconds"]), 30)
+        st.markdown("**Web page**")
+        c1, c2 = st.columns(2)
+        n["db_path"] = c1.text_input("Index database file", CFG["db_path"])
+        n["max_upload_mb"] = c2.number_input("Largest upload (MB)", 200, 100000, int(CFG["max_upload_mb"]), 100,
+                                             help="Takes effect after closing and starting the page again.")
+        b1, b2 = st.columns([1, 5])
+        save = b1.form_submit_button("Save", type="primary")
+        reset = b2.form_submit_button("Back to defaults")
+    if save or reset:
+        C.save(C.DEFAULTS if reset else n)
+        st.toast("Settings saved.")
+        st.rerun()
+
+    st.subheader("This computer")
+    import platform
+
+    st.markdown(f"* {device_line()}\n* Python {platform.python_version()} on {platform.system()} {platform.release()}")
+    libs = []
+    for mod in ("torch", "onnxruntime", "ultralytics", "fast_alpr", "insightface", "easyocr", "streamlit"):
+        try:
+            libs.append(f"{mod} {__import__(mod).__version__}")
+        except Exception:
+            pass
+    st.caption(" · ".join(libs))
+    st.subheader("Storage")
+    db_dir = os.path.dirname(os.path.abspath(db_path))
+    places = {"Index database": db_path, "Uploaded videos": UPLOADS, "Repaired DVR videos": os.path.join(db_dir, "fixed_videos"),
+              "Live recordings": "recordings", "Results and pictures": RESULTS}
+    sizes = {k: folder_size(p) for k, p in places.items() if os.path.exists(p)}
+    free = shutil.disk_usage(APP_DIR).free
+    st.markdown("\n".join(f"* {k}: **{human(b)}**" for k, b in sizes.items()) + f"\n* Free disk space: **{human(free)}**")
+    counts = store.db.execute("SELECT (SELECT COUNT(*) FROM media), (SELECT COUNT(*) FROM plate_reads), "
+                              "(SELECT COUNT(*) FROM person_dets)").fetchone()
+    st.caption(f"{counts[0]} videos/images indexed · {counts[1]} plate reads · {counts[2]} person detections")
+    if st.button("Clear saved result pictures", help="Search results and reports in the results folder. "
+                 "They are made again when you search; nothing in the index is lost."):
+        shutil.rmtree(RESULTS, ignore_errors=True)
+        st.success("Cleared.")

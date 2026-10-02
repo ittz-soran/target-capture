@@ -168,6 +168,15 @@ foreign plates stay with the general reader. To retrain it on your own corrected
 
 The **Best results** tab (also in `TIPS.md`) explains how to get the most out of your cameras, settings and searches.
 
+### Settings tab
+
+* **Version** of this copy and the date of the installed update. **Check for updates** lists what is new on GitHub;
+  **Update now** runs update_windows.bat in its own window, closes the page and opens it again when done.
+* **Defaults** for indexing, searching, the watch list, live cameras and the largest upload. They are saved in
+  `settings.json`, which updates keep.
+* **This computer** (GPU or CPU, library versions) and **Storage** (size of the index, uploads, recordings and results,
+  free disk space).
+
 ### Where results are saved
 
 Every search also saves a report in the `results` folder: `report.html` (open it in a browser to see or print it),

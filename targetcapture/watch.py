@@ -34,8 +34,15 @@ def add_face(store, photo_path: str, face_model, note: str = "") -> int:
     return store.add_watch("face", os.path.basename(photo_path), note, emb=emb, photo=jpg)
 
 
-def check(store, media_id: int | None = None, plate_max_dist: int = 1, face_threshold: float = 0.45) -> list[dict]:
-    """Look for every watch-list entry in the index (one video, or all). Returns new alerts."""
+def check(store, media_id: int | None = None, plate_max_dist: int | None = None,
+          face_threshold: float | None = None) -> list[dict]:
+    """Look for every watch-list entry in the index (one video, or all). Returns new alerts.
+    Limits not given come from the Settings tab."""
+    from . import settings
+
+    cfg = settings.load()
+    plate_max_dist = cfg["watch_plate_dist"] if plate_max_dist is None else plate_max_dist
+    face_threshold = cfg["face_threshold"] if face_threshold is None else face_threshold
     items = store.watchlist(active_only=True)
     new = []
     plates = [w for w in items if w["kind"] == "plate"]

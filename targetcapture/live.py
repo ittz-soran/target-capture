@@ -103,10 +103,19 @@ def _clock_of(path: str) -> str | None:
     return f"{m[1]} {m[2]}:{m[3]}:{m[4]}" if m else None
 
 
-def run(db_path: str, root: str = "recordings", keep_days: float = 7.0, poll: float = 10.0,
-        on_alert=None, stop_file: str | None = None, segment: int = SEGMENT, max_loops: int | None = None):
-    """Record and index all enabled cameras until stopped (Ctrl+C, or `stop_file` appears)."""
+def run(db_path: str, root: str = "recordings", keep_days: float | None = None, poll: float = 10.0,
+        on_alert=None, stop_file: str | None = None, segment: int | None = None, max_loops: int | None = None):
+    """Record and index all enabled cameras until stopped (Ctrl+C, or `stop_file` appears).
+    keep_days, segment and the indexing options not given come from the Settings tab."""
+    from . import settings
     from .pipeline import index_media
+
+    cfg = settings.load()
+    keep_days = cfg["keep_days"] if keep_days is None else keep_days
+    segment = int(cfg["segment_seconds"]) if segment is None else segment
+    opts = {k: cfg[k] for k in ("plate_fps", "person_fps", "plate_script", "car_models", "vehicle_crops",
+                                "min_ocr_conf")}
+    opts["skip_empty_road"] = cfg["skip_empty_road"]
 
     store = Store(db_path)
     recorders: dict[int, Recorder] = {}
@@ -142,7 +151,7 @@ def run(db_path: str, root: str = "recordings", keep_days: float = 7.0, poll: fl
 
                     try:
                         res = index_media(store, full, plates=bool(cam["plates"]), persons=bool(cam["persons"]),
-                                          clock_start=_clock_of(full), progress=heartbeat)
+                                          clock_start=_clock_of(full), progress=heartbeat, **opts)
                     except Exception as e:  # a broken piece must not stop the cameras
                         log.warning("could not index %s: %s", full, e)
                         res = {}

@@ -1,7 +1,10 @@
 @echo off
 REM Updates Target Capture to the latest version from GitHub, keeping your videos,
 REM index (targetcapture.db), results and .venv. Needs Git for Windows (git-scm.com).
-cd /d "%~dp0"
+REM Settings tab: runs a copy of this file with "restart <app folder>" (the update replaces this file),
+REM waits for the web page to close, and starts it again at the end.
+if "%~2"=="" (cd /d "%~dp0") else (cd /d "%~2")
+if "%~1"=="restart" timeout /t 5 /nobreak >nul
 set REPO=https://github.com/ittz-soran/target-capture.git
 where git >nul 2>nul || (echo Git is not installed. Get it from https://git-scm.com/download/win & pause & exit /b 1)
 if not exist .git (
@@ -28,4 +31,5 @@ if exist .venv\gpu.txt (
 )
 echo.
 echo Update done. Start it with run_windows.bat
+if "%~1"=="restart" (start "" run_windows.bat & exit /b 0)
 pause

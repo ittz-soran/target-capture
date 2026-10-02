@@ -20,6 +20,7 @@ DEFAULTS = {
     "person_fps": 3.0,
     "plate_script": "auto",
     "car_models": True,
+    "car_model_size": "auto",  # "fast", "accurate" or "auto" (accurate on an NVIDIA GPU)
     "vehicle_crops": False,
     "skip_empty_road": False,
     "min_ocr_conf": 0.5,

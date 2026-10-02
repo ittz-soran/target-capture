@@ -67,6 +67,9 @@ Keep the black window open while you use the page. Closing it stops Target Captu
 Under **Advanced** you can change:
 * **Plate script:** *Auto* (default) reads English and Arabic plates. *English only* is faster if you only have English plates.
 * **Car make and model:** untick to go faster if you don't need "Toyota Corolla" etc.
+  Two recognizers (Settings tab): **fast** and **accurate** (1.7 GB, clearly better at telling models apart, but about
+  8x slower, so meant for an NVIDIA GPU; "auto" uses it when there is one). Each car is looked at a few times as it
+  comes closer and the looks are combined. The model year is not recognised; the list of models is car_models.txt.
 * **Re-index from scratch:** tick this after an update to re-read an old video with the new features.
 
 ### Step 2: Search
@@ -75,6 +78,8 @@ Under **Advanced** you can change:
 * Type the plate and click **Search plate**. All of these work:
   `12345` (just the number), `١٢٣٤٥` (Arabic digits), `21 B 34567`, `12?45` (`?` = one unknown character), `12*` (`*` = anything after).
 * **Allowed character differences** (default 1) still finds the car when one character was misread.
+* Typing only part of a plate (3 characters or more, e.g. `21L1`) lists every plate that contains it under
+  **Maybe the plate you want**; tick **View** to see one.
 * Each result shows the time, how long the car was visible, vehicle make, model and colour, governorate,
   a picture of the frame, and a close-up of the plate.
 

@@ -84,7 +84,7 @@ class PlateIndexer:
         if car_models:
             from .carmodel import CarModelClassifier
 
-            self.models = CarModelClassifier()
+            self.models = CarModelClassifier(size=car_models if isinstance(car_models, str) else "auto")
         # script="arabic": read plates with the Arabic + English OCR (Iraq, Kurdistan Region, ...)
         # script="auto": read with the Latin OCR, but check each plate for Arabic script first;
         #   Arabic plates are read with the Arabic OCR, or kept as unread captures if that fails.
@@ -121,8 +121,9 @@ class PlateIndexer:
         return self._tracker.update(kept, self._t)
 
     def _vehicle_info(self, img, vtype, box, tid) -> dict:
-        """Colour of this sighting; make/model once per vehicle (again only when it comes much
-        closer), not on every frame: the model is the slowest step of plate indexing."""
+        """Colour of this sighting; make/model a few times per vehicle (first sighting, then when it
+        is clearly closer), not on every frame: the model is the slowest step of plate indexing.
+        The looks are added up, bigger views counting more, so one odd angle does not decide."""
         x1, y1, x2, y2 = box
         body = img[y1 + (y2 - y1) // 6: y1 + (y2 - y1) // 2, x1 + (x2 - x1) // 6: x2 - (x2 - x1) // 6]
         info = {"vehicle_type": vtype, "vehicle_color": dominant_color(body), "vehicle_model": None,
@@ -130,13 +131,18 @@ class PlateIndexer:
         if self.models is None or vtype not in ("car", "truck"):
             return info
         area = (x2 - x1) * (y2 - y1)
-        tr = self._tracks.setdefault(tid, {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9}) \
-            if tid is not None else {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9}
-        if tr["runs"] == 0 or (area > 1.6 * tr["area"] and tr["runs"] < 3):
-            name, p = self.models.best(img[y1:y2, x1:x2])
+        new = {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9, "p": None}
+        tr = self._tracks.setdefault(tid, new) if tid is not None else new
+        if tr["runs"] == 0 or (area > 1.3 * tr["area"] and tr["runs"] < 4):
+            # a little margin around the box: bumpers and mirrors help tell models apart
+            mx, my = (x2 - x1) // 20, (y2 - y1) // 20
+            p = self.models.probs(img[max(0, y1 - my):y2 + my, max(0, x1 - mx):x2 + mx])
             tr.update(area=area, runs=tr["runs"] + 1)
-            if name and (tr["model"] is None or (p or 0) >= (tr["conf"] or 0) * 0.8):
-                tr.update(model=name, conf=p)
+            if p is not None:
+                w = float(np.sqrt(area))
+                tr["p"] = p * w if tr["p"] is None else tr["p"] + p * w
+                name, conf = self.models.name_of(tr["p"] / tr["p"].sum())
+                tr.update(model=name, conf=conf if name else None)
         info.update(vehicle_model=tr["model"], model_conf=tr["conf"])
         return info
 
@@ -541,7 +547,11 @@ def match_score(query: str, plate: str, max_dist: int) -> tuple[bool, int]:
     d = levenshtein(q, p)
     # Only part of the plate known (e.g. the number without the governorate code or series
     # letter): compare against every same-length stretch of the plate.
-    if d > max_dist and 4 <= len(q) < len(p):
+    if d > max_dist and 3 <= len(q) < len(p):
+        if q in p:  # typed part of the plate exactly ("21L1" in "21L10415")
+            return True, 0
+        if len(q) < 4:
+            return False, d
         allowed = max_dist if len(q) >= 5 else 0
         part = min(levenshtein(q, p[i:i + len(q)]) for i in range(len(p) - len(q) + 1))
         if part <= allowed:

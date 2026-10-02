@@ -79,6 +79,10 @@ def index_media(store: Store, path: str, plates: bool = True, persons: bool = Tr
             store.reset(mid, "plates")
         from .teach import Memory
 
+        if car_models is True:  # which recognizer: Settings tab ("auto" = accurate on GPU, fast on CPU)
+            from .settings import load
+
+            car_models = load()["car_model_size"]
         key = ("plates", min_ocr_conf, vehicle_crops, plate_script, car_models)
         if key not in _INDEXERS:
             _INDEXERS[key] = L.PlateIndexer(min_ocr_conf=min_ocr_conf, vehicle_crops=vehicle_crops,

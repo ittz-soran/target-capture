@@ -64,8 +64,14 @@ def to_latin_key(text: str) -> str:
     return "".join(_TO_LATIN.get(c, c) for c in text)
 
 
+# Arabic-script letters (Arabic, Persian, Kurdish), without punctuation such as ؟ ، ؛
+AR = "\u0621-\u063A\u0641-\u064A\u0671-\u06D5"
+_AR_LETTER = re.compile(f"[{AR}]")
+
+
 def is_arabic(c: str) -> bool:
-    return "؀" <= c <= "ۿ"
+    """Arabic-script letter or Arabic-Indic / Persian digit."""
+    return bool(_AR_LETTER.match(c)) or "\u0660" <= c <= "\u0669" or "\u06F0" <= c <= "\u06F9"
 
 
 def has_arabic(text: str) -> bool:
@@ -102,10 +108,10 @@ def parse_tokens(tokens: list[tuple[float, str]]) -> tuple[str, dict]:
     words: list[tuple[float, str, bool]] = []  # (x, word, written in Arabic-Indic digits)
     for x, raw in tokens:
         eastern = any(c in _DIGITS for c in raw)
-        t = re.sub(r"[^0-9A-Z\u0600-\u06FF ]", " ", normalize_chars(raw))
+        t = re.sub(f"[^0-9A-Z{AR} ]", " ", normalize_chars(raw))
         for w in t.split():
             # OCR often glues digits and letters together ("12345أ"): split on script changes
-            for part in re.findall(r"[0-9]+|[A-Z]+|[\u0600-\u06FF]+", w):
+            for part in re.findall(f"[0-9]+|[A-Z]+|[{AR}]+", w):
                 words.append((x, part, eastern and part.isdigit()))
     joined = " ".join(w for _, w, _ in words)
     for name, en in GOVERNORATES.items():  # two-word names

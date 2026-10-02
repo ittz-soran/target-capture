@@ -10,6 +10,8 @@ import sqlite3
 
 import numpy as np
 
+from .video import SIG_H, SIG_W, read_frame
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS media (
     id INTEGER PRIMARY KEY,
@@ -41,6 +43,10 @@ CREATE TABLE IF NOT EXISTS plate_labels (   -- corrections typed in the Teach ta
     label TEXT,             -- the correct plate text, '' for "not a plate"
     sig BLOB,               -- small grey picture of the plate (48x144 uint8), for look-alike suggestions
     created TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS frame_sigs (   -- 48x27 grey thumbnail of each frame with a detection
+    media_id INTEGER, frame INTEGER, sig BLOB,   -- (finds the exact frame again in videos that seek badly)
+    PRIMARY KEY (media_id, frame)
 );
 CREATE TABLE IF NOT EXISTS person_dets (
     id INTEGER PRIMARY KEY,
@@ -98,7 +104,24 @@ class Store:
     def reset(self, media_id: int, kind: str):
         table = "plate_reads" if kind == "plates" else "person_dets"
         self.db.execute(f"DELETE FROM {table} WHERE media_id=?", (media_id,))
+        self.db.execute("""DELETE FROM frame_sigs WHERE media_id=? AND frame NOT IN
+                           (SELECT frame FROM plate_reads WHERE media_id=? UNION
+                            SELECT frame FROM person_dets WHERE media_id=?)""", (media_id,) * 3)
         self.set_progress(media_id, kind, 0, False)
+
+    # ---- frames ------------------------------------------------------------
+    def add_frame_sig(self, media_id: int, frame: int, sig: np.ndarray):
+        self.db.execute("INSERT OR REPLACE INTO frame_sigs VALUES (?,?,?)", (media_id, frame, sig.tobytes()))
+
+    def frame_sig(self, row) -> np.ndarray | None:
+        r = self.db.execute("SELECT sig FROM frame_sigs WHERE media_id=? AND frame=?",
+                            (row["media_id"], row["frame"])).fetchone()
+        return None if r is None else np.frombuffer(r["sig"], np.uint8).reshape(SIG_H, SIG_W)
+
+    def frame(self, row) -> np.ndarray | None:
+        """The video frame a detection was made in (exact, also for videos that seek badly)."""
+        media = self.media(row["media_id"])
+        return read_frame(media["path"], row["frame"], self.frame_sig(row)) if media else None
 
     # ---- plates ------------------------------------------------------------
     def add_plate_reads(self, media_id: int, rows: list[dict]):

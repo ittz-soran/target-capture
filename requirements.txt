@@ -6,6 +6,7 @@ easyocr>=1.7            # Arabic + English plate OCR (--plate-script arabic)
 insightface>=0.7.3      # face detection + ArcFace embeddings
 onnxruntime>=1.17
 opencv-python-headless>=4.8
+imageio-ffmpeg          # repairs DVR files that cannot jump to an exact frame
 numpy
 tqdm
 lap                     # used by the ByteTrack tracker

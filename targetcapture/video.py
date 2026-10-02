@@ -125,12 +125,138 @@ def iter_frames(
     cap.release()
 
 
-def read_frame(path: str, index: int) -> np.ndarray | None:
-    """Fetch one frame by index (used when building reports, so the index stays small)."""
+SIG_W, SIG_H = 48, 27
+MATCH = 3.0  # mean grey-level difference below which two frame signatures are the same frame
+
+
+def frame_signature(img: np.ndarray) -> np.ndarray:
+    """Tiny grey thumbnail (48x27) stored for every frame that had a detection, so the exact
+    frame can be found again later even in videos where seeking is inaccurate."""
+    small = cv2.resize(img, (SIG_W, SIG_H), interpolation=cv2.INTER_AREA)
+    return cv2.cvtColor(small, cv2.COLOR_BGR2GRAY)
+
+
+def _sig_diff(img: np.ndarray, sig: np.ndarray) -> float:
+    return float(np.abs(frame_signature(img).astype(np.int16) - sig.astype(np.int16)).mean())
+
+
+def read_frame(path: str, index: int, sig: np.ndarray | None = None, window: float = 4.0) -> np.ndarray | None:
+    """Fetch one frame by index (used when showing results, so the index stays small).
+
+    Many DVR files cannot seek exactly: the frame OpenCV jumps to is not the frame that was
+    analysed, and boxes would land on the wrong spot. With `sig` (the frame's signature saved
+    while indexing) the frames around the target are checked and the matching one is
+    returned; None if it cannot be found."""
     if is_image(path):
         return cv2.imread(path)
     cap = cv2.VideoCapture(path)
     cap.set(cv2.CAP_PROP_POS_FRAMES, index)
     ok, img = cap.read()
+    if sig is None or (ok and _sig_diff(img, sig) < MATCH):
+        cap.release()
+        return img if ok else None
+    fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+    if not 0 < fps <= 240:
+        fps = 25.0
+    span = int(window * fps)
+    best, best_img = 1e9, None
+    cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, index - span))
+    for _ in range(2 * span + 1):
+        ok, img = cap.read()
+        if not ok:
+            break
+        d = _sig_diff(img, sig)
+        if d < best:
+            best, best_img = d, img
+            if d < MATCH / 3:
+                break
     cap.release()
-    return img if ok else None
+    return best_img if best < MATCH else None
+
+
+def seeks_exactly(path: str, info: MediaInfo | None = None, nearly: bool = False) -> bool:
+    """True when jumping to a frame number gives the same picture as reading up to it
+    (nearly=True: or a picture a few frames away, which read_frame's check then corrects).
+    Checked at a few points, because many files seek fine inside the first keyframe group only."""
+    info = info or probe(path)
+    if info.kind == "image":
+        return True
+    if info.frames <= 0:  # raw .h264/.265 streams have no frame count and cannot seek
+        return False
+    # Test frames that look different from the first one (in a still scene a wrong frame
+    # would look right), spread over the first minute.
+    sigs: dict[int, np.ndarray] = {}
+    first = None
+    cap = cv2.VideoCapture(path)
+    last = min(info.frames - 2, int(info.fps * 60))
+    for i in range(last + 1):
+        if i == 0 or (i % max(1, int(info.fps)) == 0 and i >= info.fps * 3):
+            ok, img = cap.read()
+            if not ok:
+                break
+            sig = frame_signature(img)
+            if first is None:
+                first = sig
+            elif all(np.abs(sig.astype(np.int16) - o.astype(np.int16)).mean() > 2 * MATCH
+                     for o in [first, *sigs.values()]):
+                sigs[i] = sig
+                if len(sigs) == 3:
+                    break
+        elif not cap.grab():
+            break
+    cap.release()
+    for t, sig in sigs.items():
+        if nearly:
+            if read_frame(path, t, sig, window=2.0) is None:
+                return False
+            continue
+        cap = cv2.VideoCapture(path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, t)
+        ok, img = cap.read()
+        cap.release()
+        if not ok or _sig_diff(img, sig) >= MATCH / 3:
+            return False
+    return True
+
+
+def fix_seeking(path: str, out_dir: str, info: MediaInfo | None = None) -> str:
+    """Copy a video that cannot seek exactly (raw .h264/.265 DVR exports, broken timestamps)
+    into a new .mp4 container without re-encoding (fast, same quality). Returns the path to
+    index: the copy if it seeks exactly, otherwise the original."""
+    info = info or probe(path)
+    if info.kind == "image" or seeks_exactly(path, info, nearly=True):
+        return path
+    import shutil
+    import subprocess
+
+    exes = [shutil.which("ffmpeg")]
+    try:
+        import imageio_ffmpeg  # bundles ffmpeg, so nothing extra to install on Windows
+
+        exes.append(imageio_ffmpeg.get_ffmpeg_exe())
+    except Exception:
+        pass
+    exes = [e for e in exes if e]
+    if not exes:
+        log.warning("%s cannot seek exactly and no ffmpeg is available to repair it", path)
+        return path
+    os.makedirs(out_dir, exist_ok=True)
+    out = os.path.join(out_dir, os.path.splitext(os.path.basename(path))[0] + "_fixed.mp4")
+    raw = info.frames <= 0  # elementary stream: no timestamps, give it the frame rate
+    err = ""
+    for exe in exes if not os.path.exists(out) else []:
+        cmd = [exe, "-y", "-loglevel", "error", "-fflags", "+genpts",
+               *(["-r", f"{info.fps:g}"] if raw else []), "-i", path, "-map", "0:v:0", "-c", "copy", out]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists(out):
+            break
+        err = r.stderr.strip()[-300:] or f"exit code {r.returncode}"
+        if os.path.exists(out):
+            os.remove(out)
+    if not os.path.exists(out):
+        log.warning("could not repair %s: %s", path, err)
+        return path
+    if seeks_exactly(out, nearly=True):
+        log.warning("%s cannot seek exactly; indexing the repaired copy %s", path, out)
+        return out
+    return path

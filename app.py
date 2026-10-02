@@ -190,7 +190,7 @@ with tab_faces:
         b = p["best"]
         media = store.media(b["media_id"])
         with cols[i % 6]:
-            img = thumbnail(b, media["path"], THUMBS, box=("fx1", "fy1", "fx2", "fy2"), pad=0.35, min_w=140)
+            img = thumbnail(b, store, THUMBS, box=("fx1", "fy1", "fx2", "fy2"), pad=0.35, min_w=140)
             if img:
                 st.image(img, use_container_width=True)
             tracks = {tuple(k) if isinstance(k, list) else k: v for k, v in p["tracks"].items()}
@@ -224,7 +224,7 @@ with tab_all:
     if sel is not None and sel < len(unread):
         c = unread[sel]
         media = store.media(c["media_id"])
-        img = thumbnail(c["best"], media["path"], THUMBS, full=True)
+        img = thumbnail(c["best"], store, THUMBS, full=True)
         hdr = st.columns([4, 1])
         hdr[0].markdown(f"**Capture {sel + 1}** · {fmt_offset(c['start'])}"
                         f"{' (' + clock_time(media, c['start']) + ')' if clock_time(media, c['start']) else ''}"
@@ -240,7 +240,7 @@ with tab_all:
         n = (sl.start or 0) + i
         media = store.media(c["media_id"])
         with cols[i % 6]:
-            img = thumbnail(c["best"], media["path"], THUMBS, pad=0.1, min_w=200)
+            img = thumbnail(c["best"], store, THUMBS, pad=0.1, min_w=200)
             if img:
                 st.image(img, use_container_width=True)
             vehicle = f"{c['vehicle_color'] or ''} {c['vehicle_model'] or c['vehicle_type'] or ''}".strip()
@@ -289,7 +289,7 @@ with tab_teach:
                     for i, (sim, c) in enumerate(sims):
                         media = store.media(c["media_id"])
                         with cols[i % 6]:
-                            img = thumbnail(c["best"], media["path"], THUMBS, pad=0.1, min_w=200)
+                            img = thumbnail(c["best"], store, THUMBS, pad=0.1, min_w=200)
                             if img:
                                 st.image(img, use_container_width=True)
                             if st.checkbox(f"{fmt_offset(c['start'])} · {sim:.0%} alike", key=f"sim_{i}_{c['ids'][:1]}"):
@@ -313,12 +313,14 @@ with tab_teach:
         st.markdown(f"**{i + 1} of {len(queue)}** · {fmt_offset(c['start'])}{' (' + clock + ')' if clock else ''}"
                     f" · {os.path.basename(media['path'])}")
         left, right = st.columns([1, 2])
-        crop = thumbnail(c["best"], media["path"], THUMBS, pad=0.1, min_w=360)
-        frame = thumbnail(c["best"], media["path"], THUMBS, full=True)
+        crop = thumbnail(c["best"], store, THUMBS, pad=0.1, min_w=360)
+        frame = thumbnail(c["best"], store, THUMBS, full=True)
         if crop:
             left.image(crop, use_container_width=True)
         if frame:
             right.image(frame, use_container_width=True)
+        else:
+            right.info("This frame could not be found in the video again. Re-index the video to fix this.")
         current = c.get("text") or ""
         guess = current or c.get("ocr_guess") or ""
         vehicle = f"{c['vehicle_color'] or ''} {c['vehicle_model'] or c['vehicle_type'] or ''}".strip()

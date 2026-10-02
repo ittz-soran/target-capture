@@ -24,7 +24,6 @@ import cv2
 import numpy as np
 
 from .plates import fold, normalize
-from .video import read_frame
 
 SUGGEST_SIM = 0.75   # Teach tab: show as "may be the same plate" (you confirm)
 SIG_W, SIG_H = 144, 48
@@ -56,8 +55,7 @@ def crop_of(row, frame: np.ndarray) -> np.ndarray | None:
 
 
 def row_signature(store, row) -> np.ndarray | None:
-    media = store.media(row["media_id"])
-    return plate_signature(crop_of(row, read_frame(media["path"], row["frame"])))
+    return plate_signature(crop_of(row, store.frame(row)))
 
 
 class Memory:
@@ -118,8 +116,7 @@ def export(store, out_dir: str) -> int:
         for lab in store.labels():
             if not lab["label"]:
                 continue
-            media = store.media(lab["media_id"])
-            crop = crop_of(lab, read_frame(media["path"], lab["frame"])) if media else None
+            crop = crop_of(lab, store.frame(lab))
             if crop is None or crop.size == 0:
                 continue
             name = f"images/{lab['id']:05d}.png"

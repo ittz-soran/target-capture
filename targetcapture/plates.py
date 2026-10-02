@@ -18,7 +18,7 @@ from collections import Counter, defaultdict
 
 import numpy as np
 
-from .arabic import normalize_chars, to_latin_key
+from .arabic import AR, normalize_chars, to_latin_key
 from .colors import dominant_color
 
 log = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ _FOLD = str.maketrans({"O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "B": "8
 def normalize(text: str) -> str:
     """Canonical plate text: Arabic-Indic/Persian digits -> 0-9, Arabic letter variants unified,
     Latin upper-case, single spaces between groups."""
-    text = re.sub(r"[^0-9A-Z\u0600-\u06FF ]", " ", normalize_chars(text))
+    text = re.sub(f"[^0-9A-Z{AR} ]", " ", normalize_chars(text))
     return " ".join(text.split())
 
 

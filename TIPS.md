@@ -8,6 +8,9 @@ The system can only find what the camera recorded clearly. Most misses come from
   not a phone recording of the screen. Re-compressed or WhatsApp-forwarded videos lose the detail plates and faces need.
 * **1080p or higher** works best. 720p is fine for close cameras; at 480p plates and faces are often unreadable.
 * **Index the video file directly**: on the PC, paste its path in tab 1 instead of uploading it through the browser.
+* **Raw DVR exports** (`.h264`, `.265`, some `.ts`/`.mp4`) often cannot jump to an exact moment. Target Capture checks this
+  and, when needed, first copies the video into `fixed_videos\` as a normal `.mp4` (no quality loss, takes seconds).
+  If a red box ever sits on the road instead of the plate, tick *Re-index from scratch* for that video.
 
 ### 2. What the camera needs to see
 

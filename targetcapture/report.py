@@ -9,7 +9,6 @@ import os
 import cv2
 
 from .store import clock_time, fmt_offset
-from .video import read_frame
 
 GREEN, RED = (60, 200, 60), (40, 40, 230)
 
@@ -50,7 +49,7 @@ def plate_report(store, query, hits, out_dir):
     for i, s in enumerate(hits, 1):
         media = store.media(s["media_id"])
         b = s["best"]
-        frame = read_frame(media["path"], b["frame"])
+        frame = store.frame(b)
         snap = crop = None
         if frame is not None:
             crop = _save(_crop(frame, b["x1"], b["y1"], b["x2"], b["y2"], pad=0.1, min_w=240),
@@ -78,7 +77,7 @@ def person_report(store, query_paths, sightings, stats, threshold, out_dir):
     for i, s in enumerate(sightings, 1):
         media = store.media(s["media_id"])
         b = s["best"]
-        frame = read_frame(media["path"], b["frame"])
+        frame = store.frame(b)
         snap = face = None
         if frame is not None:
             face = _save(_crop(frame, b["fx1"], b["fy1"], b["fx2"], b["fy2"], pad=0.3, min_w=160),
@@ -128,15 +127,15 @@ th{{text-align:left;padding-right:12px;color:#666;font-weight:normal}}h2{{margin
         f.write(page)
 
 
-def thumbnail(row, video_path, cache_dir, box=("x1", "y1", "x2", "y2"), pad=0.15, min_w=160, full=False):
+def thumbnail(row, store, cache_dir, box=("x1", "y1", "x2", "y2"), pad=0.15, min_w=160, full=False):
     """Crop (or whole frame with the box drawn, if full=True) for one stored detection,
     cached on disk so galleries do not re-decode video on every page load."""
     x1, y1, x2, y2 = (row[k] for k in box)
-    name = f"{row['media_id']}_{row['frame']}_{x1}_{y1}_{'f' if full else 'c'}.jpg"
+    name = f"{row['media_id']}_{row['frame']}_{x1}_{y1}_{'f' if full else 'c'}2.jpg"
     path = os.path.join(cache_dir, name)
     if os.path.exists(path):
         return path
-    frame = read_frame(video_path, row["frame"])
+    frame = store.frame(row)
     if frame is None:
         return None
     os.makedirs(cache_dir, exist_ok=True)

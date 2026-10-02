@@ -1,13 +1,14 @@
 """Indexing pipeline shared by the CLI and the web UI."""
 from __future__ import annotations
 
+import os
 import time
 from typing import Callable
 
 from . import persons as P
 from . import plates as L
 from .store import Store
-from .video import iter_frames, probe
+from .video import fix_seeking, frame_signature, iter_frames, probe
 
 # progress(kind, frame_index, total_frames, found, video_seconds)
 Progress = Callable[[str, int, int, int, float], None]
@@ -25,6 +26,8 @@ def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float
     pending: list[dict] = []
     for frame in iter_frames(info.path, fps, start_frame=start, motion_skip=motion_skip):
         rows = indexer.process(frame)
+        if rows and info.kind == "video":
+            store.add_frame_sig(media_id, frame.index, frame_signature(frame.image))
         pending += rows
         found += len(rows)
         if progress:
@@ -45,6 +48,8 @@ def index_media(store: Store, path: str, plates: bool = True, persons: bool = Tr
                 plate_fps: float = 4.0, person_fps: float = 3.0, clock_start: str | None = None,
                 min_ocr_conf: float = 0.5, vehicle_crops: bool = False, plate_script: str = "auto", car_models: bool = True, motion_skip: bool = True,
                 reindex: bool = False, progress: Progress | None = None) -> dict:
+    # DVR exports that cannot jump to an exact frame are copied into a fixed .mp4 first
+    path = fix_seeking(path, os.path.join(os.path.dirname(os.path.abspath(store.path)), "fixed_videos"))
     info = probe(path)
     mid = store.upsert_media(info, clock_start)
     result = {"media_id": mid, "info": info}

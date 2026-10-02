@@ -93,6 +93,11 @@ Under **Advanced** you can change:
 * Click **Show #N** to see every sighting of that person. Click **Close** to go back to the list.
 * If two different people were put together, move the slider to the right. If one person appears twice in the list, move it left.
 
+**Removing videos:** in the left sidebar, click the bin next to a video to remove it from the index, or
+**Remove all videos** to start fresh. Your original video files are not deleted (only copies the app made:
+uploads and repaired DVR files), and what you taught in the Teach tab is kept. Command line:
+`python -m targetcapture remove --all`.
+
 **All plates** (tab 5)
 * **Read plates:** one row per car pass, with times, vehicle, and the words printed on the plate around the
   number (`العراق`, `السليمانية`, `SUL`, `ERB` ...) in **region / plate words**. Type in the filter box

@@ -94,6 +94,18 @@ class Store:
             return self.db.execute("SELECT * FROM media ORDER BY id").fetchall()
         return self.db.execute("SELECT * FROM media WHERE id=?", (media_id,)).fetchone()
 
+    def remove_media(self, media_id: int) -> str | None:
+        """Forget a video: its plates, people and frame pictures. Corrections typed in the Teach
+        tab are kept (they still fix the same reading mistakes in other videos)."""
+        row = self.media(media_id)
+        for table in ("plate_reads", "person_dets", "frame_sigs"):
+            self.db.execute(f"DELETE FROM {table} WHERE media_id=?", (media_id,))
+        self.db.execute("UPDATE plate_labels SET media_id=NULL WHERE media_id=?", (media_id,))
+        self.db.execute("DELETE FROM media WHERE id=?", (media_id,))
+        self.db.commit()
+        self.db.execute("VACUUM")  # give the disk space back
+        return row["path"] if row else None
+
     def set_progress(self, media_id: int, kind: str, next_frame: int, done: bool = False):
         self.db.execute(
             f"UPDATE media SET {kind}_next_frame=?, {kind}_done=? WHERE id=?",

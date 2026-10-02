@@ -120,6 +120,14 @@ def cmd_export_taught(a):
     print(f"Wrote {n} taught plate(s) to {a.out} (images/ + labels.csv)")
 
 
+def cmd_remove(a):
+    store = Store(a.db)
+    ids = [m["id"] for m in store.media()] if a.all else a.ids
+    for i in ids:
+        path = store.remove_media(i)
+        print(f"Removed [{i}] {path}" if path else f"No media [{i}]")
+
+
 def cmd_media(a):
     store = Store(a.db)
     for m in store.media():
@@ -178,6 +186,11 @@ def main(argv=None):
     s = sub.add_parser("export-taught", help="save plates typed in the Teach tab as images + labels.csv")
     s.add_argument("out", nargs="?", default=os.path.join("results", "taught_plates"))
     s.set_defaults(fn=cmd_export_taught)
+
+    s = sub.add_parser("remove", help="forget indexed videos (ids from `media`); video files are kept")
+    s.add_argument("ids", nargs="*", type=int)
+    s.add_argument("--all", action="store_true", help="remove every video, to start fresh")
+    s.set_defaults(fn=cmd_remove)
 
     s = sub.add_parser("media", help="list indexed media")
     s.set_defaults(fn=cmd_media)

@@ -3,6 +3,7 @@
     streamlit run app.py
 """
 import os
+import shutil
 import tempfile
 
 import streamlit as st
@@ -24,6 +25,19 @@ st.title("Target Capture")
 db_path = st.sidebar.text_input("Index database", "targetcapture.db")
 store = Store(db_path)
 
+def remove_media(media_id):
+    """Remove one video from the index, with its cached pictures and the copies this app made
+    (uploads, repaired DVR files). Videos you pointed to by path are never deleted."""
+    path = store.remove_media(media_id)
+    if os.path.isdir(THUMBS):
+        for f in os.listdir(THUMBS):
+            if f.startswith(f"{media_id}_"):
+                os.remove(os.path.join(THUMBS, f))
+    own = [os.path.abspath(UPLOADS), os.path.join(os.path.dirname(os.path.abspath(db_path)), "fixed_videos")]
+    if path and os.path.isfile(path) and any(os.path.abspath(path).startswith(d + os.sep) for d in own):
+        os.remove(path)
+
+
 @st.cache_resource
 def device_line():
     from targetcapture.gpu import describe
@@ -36,8 +50,23 @@ with st.sidebar:
     st.subheader("Indexed media")
     for m in store.media():
         dur = fmt_offset(m["frames"] / m["fps"]) if m["kind"] == "video" else "image"
-        st.caption(f"{os.path.basename(m['path'])} · {dur} · plates {'✓' if m['plates_done'] else '…'}"
-                   f" · people {'✓' if m['persons_done'] else '…'}")
+        row = st.columns([5, 1], vertical_alignment="center")
+        row[0].caption(f"{os.path.basename(m['path'])} · {dur} · plates {'✓' if m['plates_done'] else '…'}"
+                       f" · people {'✓' if m['persons_done'] else '…'}")
+        with row[1].popover("", icon=":material/delete:", help="Remove this video from the index"):
+            st.write(f"Remove **{os.path.basename(m['path'])}** and everything found in it?")
+            if st.button("Remove", key=f"rm_{m['id']}", type="primary"):
+                remove_media(m["id"])
+                st.rerun()
+    if store.media():
+        with st.popover("Remove all videos", use_container_width=True):
+            st.write("Remove every video and all plates and people found, to start fresh? "
+                     "Your original video files are not deleted, and what you taught in the Teach tab is kept.")
+            if st.button("Remove all", type="primary"):
+                for m in store.media():
+                    remove_media(m["id"])
+                shutil.rmtree(RESULTS, ignore_errors=True)
+                st.rerun()
 
 
 @st.cache_resource

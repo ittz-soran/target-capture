@@ -35,6 +35,15 @@ st.title("Target Capture")
 db_path = st.sidebar.text_input("Index database", CFG["db_path"])
 store = Store(db_path)
 
+
+@st.cache_resource
+def tidy_index(path):
+    """Once per start: drop rows left behind by videos removed while they were being indexed."""
+    return Store(path).purge_orphans()
+
+
+tidy_index(db_path)
+
 def remove_media(media_id):
     """Remove one video from the index, with its cached pictures and the copies this app made
     (uploads, repaired DVR files). Videos you pointed to by path are never deleted."""

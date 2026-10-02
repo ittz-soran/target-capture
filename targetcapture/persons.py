@@ -229,7 +229,7 @@ def _sightings(store, tracks: dict, threshold: float, merge_gap: float) -> list[
         s["lower_color"] = lo.most_common(1)[0][0] if lo else None
         s["confidence"] = "high" if s["sim"] >= threshold + 0.15 else "medium" if s["sim"] >= threshold + 0.05 else "low"
         media = store.media(s["media_id"])
-        cx = (b["x1"] + b["x2"]) / 2 / max(1, media["width"])
+        cx = (b["x1"] + b["x2"]) / 2 / max(1, media["width"] if media else 1)
         s["position"] = "left" if cx < 0.33 else "right" if cx > 0.66 else "center"
         del s["span"]
     return sightings

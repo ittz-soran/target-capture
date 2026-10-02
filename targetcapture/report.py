@@ -48,6 +48,8 @@ def plate_report(store, query, hits, out_dir):
     rows = []
     for i, s in enumerate(hits, 1):
         media = store.media(s["media_id"])
+        if media is None:  # video removed from the index
+            continue
         b = s["best"]
         snap, crop = _plate_snapshot(store, s, b, out_dir, f"{i:03d}")
         b2 = s.get("second")
@@ -73,6 +75,8 @@ def vehicle_report(store, vehicles, out_dir, title="Vehicle search"):
     rows = []
     for i, v in enumerate(vehicles, 1):
         media = store.media(v["media_id"])
+        if media is None:  # video removed from the index
+            continue
         b = v["best"]
         frame = store.frame(b)
         snap = crop = None
@@ -95,7 +99,7 @@ def alert_report(store, alerts, out_dir):
     rows = []
     for a in alerts:
         media = store.media(a["media_id"])
-        if media is None:
+        if media is None:  # video removed from the index
             continue
         frame = store.frame(a)
         snap = crop = None
@@ -130,6 +134,8 @@ def person_report(store, query_paths, sightings, stats, threshold, out_dir):
     rows = []
     for i, s in enumerate(sightings, 1):
         media = store.media(s["media_id"])
+        if media is None:  # video removed from the index
+            continue
         b = s["best"]
         frame = store.frame(b)
         snap = face = None

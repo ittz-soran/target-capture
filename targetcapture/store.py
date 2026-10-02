@@ -138,8 +138,18 @@ class Store:
         self.db.execute("UPDATE plate_labels SET media_id=NULL WHERE media_id=?", (media_id,))
         self.db.execute("DELETE FROM media WHERE id=?", (media_id,))
         self.db.commit()
+        self.purge_orphans()
         self.db.execute("VACUUM")  # give the disk space back
         return row["path"] if row else None
+
+    def purge_orphans(self) -> int:
+        """Delete rows of videos no longer in the index (e.g. written by a run that was still
+        indexing a video while it was removed)."""
+        n = 0
+        for table in ("plate_reads", "person_dets", "frame_sigs", "vehicle_dets", "alerts"):
+            n += self.db.execute(f"DELETE FROM {table} WHERE media_id NOT IN (SELECT id FROM media)").rowcount
+        self.db.commit()
+        return n
 
     def set_progress(self, media_id: int, kind: str, next_frame: int, done: bool = False):
         self.db.execute(

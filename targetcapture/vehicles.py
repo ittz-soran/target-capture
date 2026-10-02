@@ -75,7 +75,8 @@ def search(store, words: str = "", vehicle_type: str | None = None, color: str |
             continue
         if v["end"] - v["start"] < min_seconds:
             continue
-        if (start or end) and not _in_range(store.media(v["media_id"]), v["start"], start, end):
+        media = store.media(v["media_id"])
+        if media is None or ((start or end) and not _in_range(media, v["start"], start, end)):
             continue
         out.append(v)
     return out

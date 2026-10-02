@@ -40,6 +40,9 @@ def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float
             found += len(rows)
             next_frame = frame.index + 1
             if time.time() - last_commit > 10:
+                if store.media(media_id) is None:  # removed from the index while being indexed
+                    store.db.rollback()
+                    return found
                 add(media_id, pending)
                 pending = []
                 store.set_progress(media_id, kind, next_frame)  # commits; safe to stop and resume

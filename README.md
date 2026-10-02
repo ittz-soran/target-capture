@@ -94,8 +94,10 @@ Under **Advanced** you can change:
 * If two different people were put together, move the slider to the right. If one person appears twice in the list, move it left.
 
 **All plates** (tab 5)
-* **Read plates:** a table of every plate read, with times, vehicle and details. Type in the filter box
-  (e.g. `corolla`, `white toyota`, `Erbil`) to narrow it down.
+* **Read plates:** one row per car pass, with times, vehicle, and the words printed on the plate around the
+  number (`العراق`, `السليمانية`, `SUL`, `ERB` ...) in **region / plate words**. Type in the filter box
+  (e.g. `corolla`, `white toyota`, `Erbil`) to narrow it down. Tick **View** at the end of a row to open that
+  plate like a search result: the best capture of the car and a second capture taken after it.
 * **Plates that could not be read:** pictures of plates that were found but not read (other alphabets,
   blur, too small). Click **Open** under one to see the whole frame.
 

@@ -49,12 +49,13 @@ def show_rows(rows, out_dir, image_keys):
     for r in rows:
         with st.container(border=True):
             cols = st.columns([2, 1, 2])
-            if r.get("frame_image"):
-                cols[0].image(os.path.join(out_dir, r["frame_image"]))
+            for k, label in (("frame_image", "Best capture"), ("second_frame_image", "Second capture")):
+                if r.get(k):
+                    cols[0].image(os.path.join(out_dir, r[k]), caption=label if r.get("second_frame_image") else None)
             for k in image_keys:
                 if r.get(k):
                     cols[1].image(os.path.join(out_dir, r[k]))
-            cols[2].json({k: v for k, v in r.items() if not k.endswith("_image")}, expanded=True)
+            cols[2].json({k: v for k, v in r.items() if not k.endswith("_image") and v is not None}, expanded=True)
 
 
 def pager(n, key):
@@ -131,7 +132,7 @@ with tab_plate:
         rows = plate_report(store, q, hits, out)
         st.subheader(f"{len(rows)} sighting(s)")
         st.caption(f"Full report saved to {os.path.join(out, 'report.html')}")
-        show_rows(rows, out, ["plate_image"])
+        show_rows(rows, out, ["plate_image", "second_plate_image"])
 
 with tab_person:
     photos = st.file_uploader("Photo(s) of the person's face", type=["jpg", "jpeg", "png", "webp"],
@@ -207,14 +208,26 @@ with tab_all:
     sightings = [s for s in L.group_sightings(store.plate_reads()) if s["reads"] >= min_r and all(
         w in " ".join(str(s[k] or "") for k in ("vehicle_model", "vehicle_color", "vehicle_type", "region")).lower()
         for w in vfilter)]
-    st.dataframe([{
-        "plate": s["text"], "start": fmt_offset(s["start"]), "end": fmt_offset(s["end"]),
-        "clock": clock_time(store.media(s["media_id"]), s["start"]), "reads": s["reads"],
+    table = [{
+        "plate": s["text"], "region / plate words": s["region"] or "",
+        "start": fmt_offset(s["start"]), "end": fmt_offset(s["end"]),
+        "clock": clock_time(store.media(s["media_id"]), s["start"]) or "", "reads": s["reads"],
         "conf": s["conf"], "vehicle": f"{s['vehicle_color'] or ''} {s['vehicle_model'] or s['vehicle_type'] or ''}".strip(),
-        "details": s["region"],
         "source": {"taught": "typed by you", "learned": "learned"}.get(s["source"], "read"),
         "video": os.path.basename(store.media(s["media_id"])["path"]),
-    } for s in sightings], use_container_width=True)
+        "View": False,
+    } for s in sightings]
+    st.caption("Tick **View** to open a plate with its best capture and a second one taken after it.")
+    edited = st.data_editor(table, use_container_width=True, hide_index=True, key=f"plates_table_{len(table)}",
+                            disabled=[k for k in (table[0] if table else {}) if k != "View"],
+                            column_config={"View": st.column_config.CheckboxColumn("View", width="small")})
+    picked = [i for i, row in enumerate(edited) if row["View"]]
+    if picked:
+        s = sightings[picked[-1]]
+        out = os.path.join(RESULTS, "plate_view_" + "".join(ch for ch in s["text"] if ch.isalnum()))
+        rows = plate_report(store, s["text"], [s], out)
+        st.markdown(f"**{s['text']}** · {fmt_offset(s['start'])} to {fmt_offset(s['end'])}")
+        show_rows(rows, out, ["plate_image", "second_plate_image"])
 
     unread = L.group_unread(store.plate_reads(unread=True))
     st.subheader(f"Plates that could not be read ({len(unread)})")

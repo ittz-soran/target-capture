@@ -116,13 +116,29 @@ class PlateIndexer:
                     reads.append({"text": "", "conf": float(r.detection.confidence), "region": None,
                                   "ocr_guess": text or None, **box})
                 continue
-            if self.script == "auto" and not self._known_latin(b):
-                arabic = self._arabic_check(img, b)
-                if arabic is not None:  # not an English plate: Arabic read, or an unread capture
-                    reads.append({**arabic, **box} if arabic["text"] else
-                                 {**arabic, "conf": float(r.detection.confidence), **box})
-                    continue
-            reads.append({"text": text, "conf": conf, "region": getattr(r.ocr, "region", None), **box})
+            text, code_region = strip_codes(text)
+            region = code_region
+            if self.script == "auto":
+                seen = self._known_latin(b)
+                if seen is False:
+                    arabic = self._arabic_check(img, b)
+                    if isinstance(arabic, str):  # English plate; arabic = the words around the number
+                        region = arabic or region
+                        self._latin_seen.append((self._t, (b.x1 + b.x2) / 2, region))
+                    elif (arabic.pop("eastern") or _has_arabic_letters(arabic["text"])
+                          or (arabic["text"] and not _latin_wins(text, conf, arabic["text"]))):
+                        # an Arabic plate: Arabic read, or an unread capture
+                        reads.append({**arabic, **box} if arabic["text"] else
+                                     {**arabic, "conf": float(r.detection.confidence), **box})
+                        continue
+                    else:
+                        # English number with Arabic words (e.g. "العراق", "السليمانية") around it:
+                        # keep the English read, which is more accurate, and the words as region
+                        region = arabic.get("region") or region
+                        self._latin_seen.append((self._t, (b.x1 + b.x2) / 2, region))
+                else:
+                    region = seen or region
+            reads.append({"text": text, "conf": conf, "region": region, **box})
         return reads
 
     def _plate_crop(self, img, b):
@@ -131,24 +147,31 @@ class PlateIndexer:
         mx, my = (x2 - x1) // 20, (y2 - y1) // 8
         return img[max(0, y1 - my):min(img.shape[0], y2 + my), max(0, x1 - mx):min(img.shape[1], x2 + mx)]
 
-    def _known_latin(self, b) -> bool:
+    def _known_latin(self, b):
         """The same plate was checked a moment ago and was English: skip the slower Arabic check.
-        Saves one Arabic OCR per frame; each car pass is checked about once."""
+        Saves one Arabic OCR per frame; each car pass is checked about once. Returns False if not
+        seen, else the region words found then ('' if none)."""
         cx, w = (b.x1 + b.x2) / 2, max(1, b.x2 - b.x1)
-        return any(self._t - t <= 1.5 and abs(cx - x) <= 3 * w for t, x in self._latin_seen)
+        for t, x, region in reversed(self._latin_seen):
+            if self._t - t <= 1.5 and abs(cx - x) <= 3 * w:
+                return region or ""
+        return False
 
     def _arabic_check(self, img, b):
-        """None for a Latin plate; otherwise the Arabic read (text '' if it could not be read)."""
+        """For an English plate: the region words around the number ('' if none). Otherwise the
+        Arabic read (text '' if it could not be read)."""
         from .arabic import has_arabic
 
         text, conf, details, raw = self.arabic.read(self._plate_crop(img, b))
-        if not has_arabic(raw):
-            self._latin_seen.append((self._t, (b.x1 + b.x2) / 2))
-            return None
         region = ", ".join(str(v) for k, v in details.items() if k != "other_text") or None
+        if not has_arabic(raw):
+            return region or ""
+        # number written in Arabic-Indic digits: an Arabic plate even without Arabic letters
+        # (3 or more: a lone one is often a misread letter, "E" read as "٤")
+        eastern = sum("\u0660" <= c <= "\u0669" or "\u06F0" <= c <= "\u06F9" for c in raw) >= 3
         if sum(c.isdigit() for c in text) >= 3 and conf >= self.min_arabic_conf:
-            return {"text": text, "conf": conf, "region": region}
-        return {"text": "", "region": region, "ocr_guess": raw or None}
+            return {"text": text, "conf": conf, "region": region, "eastern": eastern}
+        return {"text": "", "region": region, "ocr_guess": raw or None, "eastern": eastern}
 
     def _read_arabic(self, img, ox=0, oy=0):
         reads = []
@@ -171,7 +194,7 @@ class PlateIndexer:
     def process(self, frame) -> list[dict]:
         img = frame.image
         self._t = frame.t
-        self._latin_seen = [(t, x) for t, x in self._latin_seen if frame.t - t <= 1.5]
+        self._latin_seen = [e for e in self._latin_seen if frame.t - e[0] <= 1.5]
         vehicles = None
         reads = self._read(img)
         if self.vehicle_crops:
@@ -223,14 +246,65 @@ def _iou(a, b):
 # Grouping reads into sightings
 # ---------------------------------------------------------------------------
 
-def group_sightings(reads, gap: float = 4.0, max_dist: int = 1) -> list[dict]:
-    """Merge reads of the same plate that are close in time into one sighting.
+def _has_arabic_letters(text: str) -> bool:
+    return bool(re.search(f"[{AR}]", text or ""))
 
-    Two reads join the same sighting when they are in the same media, within `gap`
-    seconds of the sighting's last read, and their folded texts are within
-    `max_dist` edits.
+
+def _latin_wins(latin: str, latin_conf: float, arabic: str) -> bool:
+    """English number with Arabic words around it: trust the English read when it is sure and
+    its digits agree with the Arabic reader's (it also keeps Latin letters such as "E")."""
+    d1, d2 = (re.sub(r"\D", "", x) for x in (latin, arabic))
+    return latin_conf >= 0.9 and levenshtein(d1, d2) <= 1
+
+
+def strip_codes(text: str) -> tuple[str, str | None]:
+    """Remove a governorate code the English reader glued to the number ("SUL21E41707" ->
+    "21E41707", "Sulaymaniyah"). Only when enough of the number is left."""
+    from .arabic import PLATE_CODES
+
+    t = text.replace(" ", "")
+    for code, name in PLATE_CODES.items():
+        for rest in ((t[3:] if t.startswith(code) else None), (t[:-3] if t.endswith(code) else None)):
+            if rest and sum(c.isdigit() for c in rest) >= 4:
+                return rest, name
+    return text, None
+
+
+def _quality(r) -> float:
+    """How good a capture is: reader confidence, and bigger plates (closer to the camera)
+    are clearer. Used to pick the picture shown for a car."""
+    if r.get("x1") is None:
+        return float(r["conf"] or 0)
+    w = max(1, r["x2"] - r["x1"])
+    return float(r["conf"] or 0) * min(1.0, w / 140) ** 0.5
+
+
+def _near(a, b, secs: float = 1.5) -> bool:
+    """Same plate moving through the picture: close in time and position."""
+    if a.get("x1") is None or b.get("x1") is None:
+        return False
+    w = max(1, a["x2"] - a["x1"], b["x2"] - b["x1"])
+    ca, cb = ((a["x1"] + a["x2"]) / 2, (a["y1"] + a["y2"]) / 2), ((b["x1"] + b["x2"]) / 2, (b["y1"] + b["y2"]) / 2)
+    return abs(b["t"] - a["t"]) <= secs and abs(ca[0] - cb[0]) <= 3 * w and abs(ca[1] - cb[1]) <= 3 * w
+
+
+def _same_text(a: str, b: str, max_dist: int, near: bool) -> bool:
+    if levenshtein(a, b) <= max_dist + (1 if near else 0):
+        return True
+    # a partial read ("5AU5") of the full plate ("5AU5341")
+    short, long_ = sorted((a, b), key=len)
+    return short in long_ and len(short) >= (3 if near else 5)
+
+
+def group_sightings(reads, gap: float = 4.0, max_dist: int = 1) -> list[dict]:
+    """Merge reads of the same car into one sighting.
+
+    A read joins a sighting when it is in the same media, within `gap` seconds of the
+    sighting's last read, and reads the same (within `max_dist` edits, or as a partial read
+    of it). A plate that is still moving through the picture also merges with one more
+    difference allowed, so OCR slips do not split one car into several rows.
     """
-    open_: dict[int, list[dict]] = defaultdict(list)
+    open_: dict[int, list[list]] = defaultdict(list)
     done: list[list] = []
     for r in reads:
         r = dict(r)
@@ -245,7 +319,8 @@ def group_sightings(reads, gap: float = 4.0, max_dist: int = 1) -> list[dict]:
         groups[:] = still_open
         target = None
         for g in groups:
-            if levenshtein(key, fold(g[-1]["text"])) <= max_dist:
+            near = any(_near(x, r) for x in g[-3:])
+            if any(_same_text(key, fold(x["text"]), max_dist, near) for x in g[-3:]):
                 target = g
                 break
         if target is None:
@@ -260,11 +335,21 @@ def group_sightings(reads, gap: float = 4.0, max_dist: int = 1) -> list[dict]:
 def _summarize(g: list[dict]) -> dict:
     votes = Counter()
     for r in g:
-        votes[r["text"]] += r["conf"]
-    text = votes.most_common(1)[0][0]
-    best = max(g, key=lambda r: (r["text"] == text, r["conf"]))
+        votes[r["text"]] += _quality(r)
+    # partial reads support the full text they are part of
+    for t in list(votes):
+        for r in g:
+            if r["text"] != t and fold(r["text"]) in fold(t):
+                votes[t] += 0.5 * _quality(r)
+    text = max(votes, key=lambda t: (round(votes[t], 6), len(t)))
+    same = [r for r in g if r["text"] == text]
+    best = max(same, key=_quality)
+    # second capture: the best one at least half a second after the best (else before it)
+    later = [r for r in same if r["t"] >= best["t"] + 0.5] or [r for r in same if r["t"] <= best["t"] - 0.5]
+    second = max(later, key=_quality) if later else None
     vtypes = Counter(r["vehicle_type"] for r in g if r["vehicle_type"])
     vcols = Counter(r["vehicle_color"] for r in g if r["vehicle_color"])
+    regions = Counter(r["region"] for r in g if r.get("region"))
     vmodels = Counter()
     for r in g:
         if r.get("vehicle_model"):
@@ -278,13 +363,14 @@ def _summarize(g: list[dict]) -> dict:
         "start": g[0]["t"], "end": g[-1]["t"],
         "reads": len(g),
         "conf": round(best["conf"], 3),
-        "region": best["region"],
+        "region": regions.most_common(1)[0][0] if regions else None,
         "vehicle_type": vtypes.most_common(1)[0][0] if vtypes else None,
         "vehicle_color": vcols.most_common(1)[0][0] if vcols else None,
         "vehicle_model": model,
         "model_conf": round(model_score / n_model, 2) if model else None,
         "model_alternatives": [m for m, _ in vmodels.most_common(3)[1:]],
         "best": best,
+        "second": second,
         "ids": [r["id"] for r in g if "id" in r],
         "source": "taught" if any(r.get("source") == "taught" for r in g)
                   else "learned" if any(r.get("source") == "learned" for r in g) else None,

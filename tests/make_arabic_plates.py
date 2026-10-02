@@ -19,6 +19,7 @@ SAMPLES = [
     ("erbil_private", "اربيل", "خصوصي", "12345", "", "kurdistan"),
     ("baghdad_new", "IRQ", "بغداد", "34567", "ب", "iraq_new"),
     ("duhok_taxi", "دهوك", "اجرة", "70981", "", "kurdistan"),
+    ("sulaymaniyah_new", "IRQ", "السليمانية  SUL", "41707", "E", "iraq_latin"),  # English number, Arabic words
 ]
 
 
@@ -27,7 +28,7 @@ def text(d, xy, s, size, anchor="mm", fill=(0, 0, 0)):
 
 
 def render(top_l, top_r, number, letter, layout):
-    W, H = 520, 130 if layout == "iraq_new" else 220
+    W, H = 520, 220 if layout == "kurdistan" else 130
     img = Image.new("RGB", (W, H), "white")
     d = ImageDraw.Draw(img)
     d.rectangle([2, 2, W - 3, H - 3], outline=(0, 0, 0), width=4)
@@ -41,7 +42,8 @@ def render(top_l, top_r, number, letter, layout):
         d.rectangle([4, 4, 80, H - 5], fill=(20, 60, 160))
         text(d, (42, H / 2), top_l, 24, fill=(255, 255, 255))
         text(d, (W * 0.58, 26), top_r, 26)
-        text(d, (W * 0.58, 85), f"{number}  {letter}  21", 60)
+        main = f"21 {letter} {number}" if layout == "iraq_latin" else f"{number}  {letter}  21"
+        text(d, (W * 0.58, 85), main, 60)
     return cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 
 

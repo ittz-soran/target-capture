@@ -45,7 +45,14 @@ GOVERNORATES = {
     "NAJAF": "Najaf", "واسط": "Wasit", "WASIT": "Wasit", "القادسيه": "Qadisiyah", "QADISIYAH": "Qadisiyah",
     "الديوانيه": "Qadisiyah", "ميسان": "Maysan", "MAYSAN": "Maysan", "ذي قار": "Dhi Qar", "ذيقار": "Dhi Qar",
     "DHIQAR": "Dhi Qar", "المثنى": "Muthanna", "المثني": "Muthanna", "MUTHANNA": "Muthanna",
+    # Kurdish spellings and the 3-letter codes printed on Kurdistan Region plates
+    "سليمانيه": "Sulaymaniyah", "سلێماني": "Sulaymaniyah", "دهۆك": "Duhok", "دهوک": "Duhok",
+    "کەرکووک": "Kirkuk", "كەركووك": "Kirkuk", "هەڵەبجە": "Halabja",
+    "SUL": "Sulaymaniyah", "SLE": "Sulaymaniyah", "SLM": "Sulaymaniyah", "ERB": "Erbil", "EBL": "Erbil",
+    "HWL": "Erbil", "DUH": "Duhok", "DHK": "Duhok", "KRK": "Kirkuk", "HLB": "Halabja", "HAL": "Halabja",
 }
+# Codes that may stick to the plate number in an English read ("SUL21E41707")
+PLATE_CODES = {k: v for k, v in GOVERNORATES.items() if len(k) == 3 and k.isascii()}
 REGION_WORDS = {"العراق": "Iraq", "IRAQ": "Iraq", "IRQ": "Iraq", "كوردستان": "Kurdistan",
                 "كردستان": "Kurdistan", "KURDISTAN": "Kurdistan", "KRG": "Kurdistan", "KRI": "Kurdistan",
                 "اقليم": "Kurdistan", "هريم": "Kurdistan", "هەرێم": "Kurdistan"}

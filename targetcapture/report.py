@@ -49,26 +49,36 @@ def plate_report(store, query, hits, out_dir):
     for i, s in enumerate(hits, 1):
         media = store.media(s["media_id"])
         b = s["best"]
-        frame = store.frame(b)
-        snap = crop = None
-        if frame is not None:
-            crop = _save(_crop(frame, b["x1"], b["y1"], b["x2"], b["y2"], pad=0.1, min_w=240),
-                         os.path.join(out_dir, f"{i:03d}_plate.jpg"))
-            if b["vx1"] is not None:
-                cv2.rectangle(frame, (b["vx1"], b["vy1"]), (b["vx2"], b["vy2"]), GREEN, 2)
-            cv2.rectangle(frame, (b["x1"], b["y1"]), (b["x2"], b["y2"]), RED, 2)
-            cv2.putText(frame, s["text"], (b["x1"], max(20, b["y1"] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, RED, 2)
-            snap = _save(frame, os.path.join(out_dir, f"{i:03d}_frame.jpg"), max_w=1280)
-        rows.append({"n": i, "plate": s["text"], "exact": s["exact"], "partial_match": s["partial"], "edit_distance": s["distance"],
+        snap, crop = _plate_snapshot(store, s, b, out_dir, f"{i:03d}")
+        b2 = s.get("second")
+        snap2, crop2 = _plate_snapshot(store, s, b2, out_dir, f"{i:03d}_2") if b2 else (None, None)
+        rows.append({"n": i, "plate": s["text"], "exact": s.get("exact"), "partial_match": s.get("partial"), "edit_distance": s.get("distance"),
                      "ocr_variants": s["variants"], "reads": s["reads"], "ocr_conf": s["conf"],
                      "region_guess": s["region"], "vehicle_type": s["vehicle_type"],
                      "vehicle_color": s["vehicle_color"], "vehicle_model": s["vehicle_model"],
                      "model_confidence": s["model_conf"], "other_possible_models": s["model_alternatives"] or None,
                      **_times(media, s["start"], s["end"]),
-                     "frame": b["frame"], "video": media["path"], "frame_image": snap, "plate_image": crop})
+                     "best_capture_at": fmt_offset(b["t"]),
+                     "second_capture_at": fmt_offset(b2["t"]) if b2 else None,
+                     "frame": b["frame"], "video": media["path"], "frame_image": snap, "plate_image": crop,
+                     "second_frame_image": snap2, "second_plate_image": crop2})
     _write(out_dir, rows, f'Plate search: "{query}"',
            f"{len(rows)} sighting(s) of plates matching <b>{html.escape(query)}</b>")
     return rows
+
+
+def _plate_snapshot(store, s, b, out_dir, stem):
+    """Save the whole frame (boxes drawn) and the plate close-up of one capture."""
+    frame = store.frame(b)
+    if frame is None:
+        return None, None
+    crop = _save(_crop(frame, b["x1"], b["y1"], b["x2"], b["y2"], pad=0.1, min_w=240),
+                 os.path.join(out_dir, f"{stem}_plate.jpg"))
+    if b["vx1"] is not None:
+        cv2.rectangle(frame, (b["vx1"], b["vy1"]), (b["vx2"], b["vy2"]), GREEN, 2)
+    cv2.rectangle(frame, (b["x1"], b["y1"]), (b["x2"], b["y2"]), RED, 2)
+    cv2.putText(frame, s["text"], (b["x1"], max(20, b["y1"] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, RED, 2)
+    return _save(frame, os.path.join(out_dir, f"{stem}_frame.jpg"), max_w=1280), crop
 
 
 def person_report(store, query_paths, sightings, stats, threshold, out_dir):

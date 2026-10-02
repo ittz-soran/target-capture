@@ -61,3 +61,16 @@ def test_plate_pictures_tolerate_small_shifts():
     other = (rng.random((60, 200)) * 255).astype(np.uint8)
     a, b, c = plate_signature(plate), plate_signature(shifted), plate_signature(other)
     assert signature_similarity(a, b) > 0.8 > signature_similarity(a, c)
+
+
+def test_one_car_one_row_with_best_and_second_capture():
+    def r(t, text, conf, x, w):
+        return dict(media_id=1, region=None, vehicle_type="car", vehicle_color="white", t=t, text=text,
+                    conf=conf, x1=x, y1=300, x2=x + w, y2=300 + w // 3)
+    reads = [r(10.0, "5AU5", 0.7, 600, 60), r(10.25, "5AU5341", 0.8, 590, 80), r(10.5, "5AU5841", 0.6, 580, 100),
+             r(10.75, "5AU5341", 0.95, 570, 130), r(11.5, "5AU5341", 0.9, 560, 150),
+             r(12.0, "7KD2210", 0.9, 100, 120)]  # another car elsewhere in the picture
+    s = group_sightings(reads)
+    assert [x["text"] for x in s] == ["5AU5341", "7KD2210"]
+    assert s[0]["reads"] == 5
+    assert s[0]["best"]["t"] == 10.75 and s[0]["second"]["t"] == 11.5

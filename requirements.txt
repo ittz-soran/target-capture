@@ -10,7 +10,7 @@ imageio-ffmpeg          # repairs DVR files that cannot jump to an exact frame
 numpy
 tqdm
 lap                     # used by the ByteTrack tracker
-streamlit>=1.40         # web UI (app.py)
+streamlit>=1.50         # web UI (app.py)
 openpyxl                # Excel export
 fpdf2                   # PDF export
 uharfbuzz               # Arabic / Kurdish text in PDFs

@@ -23,8 +23,8 @@ if errorlevel 1 (echo Installing libraries failed, see the error above. & pause 
 if exist .venv\gpu.txt (
   REM requirements.txt brings back the CPU-only onnxruntime; swap the GPU one in again
   pip uninstall -q -y onnxruntime onnxruntime-gpu
-  pip install -q --force-reinstall --no-deps onnxruntime-gpu
-  pip install -q onnxruntime-gpu
+  pip install -q --force-reinstall --no-deps "onnxruntime-gpu<1.27"
+  pip install -q "onnxruntime-gpu<1.27"
 )
 echo.
 echo Update done. Start it with run_windows.bat

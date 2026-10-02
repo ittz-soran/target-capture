@@ -23,7 +23,8 @@ exit /b 0
 
 :onnx_gpu
 REM onnxruntime and onnxruntime-gpu share one folder, so remove both and put the GPU one back.
+REM Below 1.27: newer builds need CUDA 13, which the PyTorch cu126 install does not ship (and older GTX cards cannot run).
 pip uninstall -y onnxruntime onnxruntime-gpu
-pip install --force-reinstall --no-deps onnxruntime-gpu
-pip install onnxruntime-gpu
+pip install --force-reinstall --no-deps "onnxruntime-gpu<1.27"
+pip install "onnxruntime-gpu<1.27"
 exit /b

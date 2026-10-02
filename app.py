@@ -65,7 +65,7 @@ with st.sidebar:
                 remove_media(m["id"])
                 st.rerun()
     if store.media():
-        with st.popover("Remove all videos", use_container_width=True):
+        with st.popover("Remove all videos", width="stretch"):
             st.write("Remove every video and all plates and people found, to start fresh? "
                      "Your original video files are not deleted, and what you taught in the Teach tab is kept.")
             if st.button("Remove all", type="primary"):
@@ -410,7 +410,7 @@ with tab_faces:
         with cols[i % 6]:
             img = thumbnail(b, store, THUMBS, box=("fx1", "fy1", "fx2", "fy2"), pad=0.35, min_w=140)
             if img:
-                st.image(img, use_container_width=True)
+                st.image(img, width="stretch")
             tracks = {tuple(k) if isinstance(k, list) else k: v for k, v in p["tracks"].items()}
             seen = len(P.person_sightings(store, {**p, "tracks": tracks}, threshold=f_thr))
             st.caption(f"#{p['id']} · seen {seen}x · first at {fmt_offset(p['first'])}")
@@ -435,7 +435,7 @@ with tab_all:
         "View": False,
     } for s in sightings]
     st.caption("Tick **View** to open a plate with its best capture and a second one taken after it.")
-    edited = st.data_editor(table, use_container_width=True, hide_index=True, key=f"plates_table_{len(table)}",
+    edited = st.data_editor(table, width="stretch", hide_index=True, key=f"plates_table_{len(table)}",
                             disabled=[k for k in (table[0] if table else {}) if k != "View"],
                             column_config={"View": st.column_config.CheckboxColumn("View", width="small")})
     picked = [i for i, row in enumerate(edited) if row["View"]]
@@ -479,7 +479,7 @@ with tab_all:
         with cols[i % 6]:
             img = thumbnail(c["best"], store, THUMBS, pad=0.1, min_w=200)
             if img:
-                st.image(img, use_container_width=True)
+                st.image(img, width="stretch")
             vehicle = f"{c['vehicle_color'] or ''} {c['vehicle_model'] or c['vehicle_type'] or ''}".strip()
             st.caption(f"{fmt_offset(c['start'])} · {vehicle or 'vehicle ?'}"
                        f"{' · seen ' + str(c['detections']) + 'x' if c['detections'] > 1 else ''}")
@@ -528,7 +528,7 @@ with tab_teach:
                         with cols[i % 6]:
                             img = thumbnail(c["best"], store, THUMBS, pad=0.1, min_w=200)
                             if img:
-                                st.image(img, use_container_width=True)
+                                st.image(img, width="stretch")
                             if st.checkbox(f"{fmt_offset(c['start'])} · {sim:.0%} alike", key=f"sim_{i}_{c['ids'][:1]}"):
                                 picked.append(c)
                     if picked and st.button(f"Apply {last['label']} to {len(picked)} selected"):
@@ -553,9 +553,9 @@ with tab_teach:
         crop = thumbnail(c["best"], store, THUMBS, pad=0.1, min_w=360)
         frame = thumbnail(c["best"], store, THUMBS, full=True)
         if crop:
-            left.image(crop, use_container_width=True)
+            left.image(crop, width="stretch")
         if frame:
-            right.image(frame, use_container_width=True)
+            right.image(frame, width="stretch")
         else:
             right.info("This frame could not be found in the video again. Re-index the video to fix this.")
         current = c.get("text") or ""

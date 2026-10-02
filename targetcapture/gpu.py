@@ -26,7 +26,20 @@ def torch_cuda() -> bool:
 
 def half() -> dict:
     """YOLO options: half precision on an NVIDIA card (about twice as fast), nothing on CPU."""
-    return {"half": True} if torch_cuda() else {}
+    if not torch_cuda():
+        return {}
+    return {"quantize": 16} if _has_quantize() else {"half": True}
+
+
+@functools.lru_cache(maxsize=None)
+def _has_quantize() -> bool:
+    """Newer Ultralytics renamed 'half' to 'quantize' and warns on the old name."""
+    try:
+        from ultralytics.cfg import DEFAULT_CFG_DICT
+
+        return "quantize" in DEFAULT_CFG_DICT
+    except Exception:
+        return False
 
 
 @functools.lru_cache(maxsize=None)

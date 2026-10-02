@@ -1,0 +1,3 @@
+[server]
+# Long DVR recordings are often several GB (Streamlit allows only 200 MB by default)
+maxUploadSize = 20000

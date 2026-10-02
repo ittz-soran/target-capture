@@ -108,7 +108,10 @@ Under **Advanced** you can change:
 
 **Download results:** every search result, a plate opened with **View**, a person from All faces, the
 watch-list matches and the whole All plates list can be downloaded as **Excel** (pictures in the sheet)
-or **PDF**.
+or **PDF**. The file is made when you click the button, so searches stay fast.
+
+**Big videos:** files up to 20 GB can be uploaded (set in `.streamlit/config.toml`). For multi-hour DVR files,
+typing the file's path is quicker because nothing is copied. Long videos do not need splitting.
 
 ### Step 3: Browse everything
 

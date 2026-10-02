@@ -94,18 +94,23 @@ def show_rows(rows, out_dir, image_keys):
 
 
 def downloads(rows, out_dir, title, key):
-    """Excel and PDF of these results."""
+    """Excel and PDF buttons. The files are made only when a button is clicked, not with every search."""
     if not rows:
         return
+
+    def excel():
+        with open(to_excel(rows, out_dir, os.path.join(out_dir, "results.xlsx"), title), "rb") as f:
+            return f.read()
+
+    def pdf():
+        with open(to_pdf(rows, out_dir, os.path.join(out_dir, "results.pdf"), title), "rb") as f:
+            return f.read()
+
     c1, c2, _ = st.columns([1, 1, 3])
-    xlsx = to_excel(rows, out_dir, os.path.join(out_dir, "results.xlsx"), title)
-    pdf = to_pdf(rows, out_dir, os.path.join(out_dir, "results.pdf"), title)
-    with open(xlsx, "rb") as f:
-        c1.download_button("Download Excel", f.read(), f"{key}.xlsx", key=f"xl_{key}", on_click="ignore",
-                           icon=":material/table_view:")
-    with open(pdf, "rb") as f:
-        c2.download_button("Download PDF", f.read(), f"{key}.pdf", key=f"pdf_{key}", on_click="ignore",
-                           icon=":material/picture_as_pdf:")
+    c1.download_button("Download Excel", excel, f"{key}.xlsx", key=f"xl_{key}", on_click="ignore",
+                       icon=":material/table_view:")
+    c2.download_button("Download PDF", pdf, f"{key}.pdf", key=f"pdf_{key}", on_click="ignore",
+                       icon=":material/picture_as_pdf:")
 
 
 def pager(n, key):
@@ -173,7 +178,7 @@ with tab_index:
             os.makedirs(UPLOADS, exist_ok=True)
             path = os.path.join(UPLOADS, up.name)
             with open(path, "wb") as f:
-                f.write(up.getbuffer())
+                shutil.copyfileobj(up, f, 16 << 20)
         else:
             path = path_in
         bars = {}

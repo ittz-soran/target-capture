@@ -8,11 +8,11 @@ Index a long video (or an image) once, then search it:
 
 ## Install
 
-Python 3.10 or newer (3.11 recommended).
+Python 3.10 to 3.13 (3.11 recommended).
 
 ### Windows
 
-1. Install Python 3.11 from python.org and tick "Add python.exe to PATH".
+1. Python: `setup_windows.bat` finds it, or installs Python 3.11 for you if it is missing. (By hand: python.org, tick "Add python.exe to PATH".)
 2. Install "Microsoft C++ Build Tools" (choose "Desktop development with C++"); InsightFace needs it.
 3. Double-click `setup_windows.bat` once, then `run_windows.bat` whenever you want to use it.
 4. To get a new version, double-click `update_windows.bat` (needs Git for Windows). Your videos, index and results are kept.

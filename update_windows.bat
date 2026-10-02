@@ -12,9 +12,14 @@ if not exist .git (
 git fetch -q origin main || (echo Could not reach GitHub. Check your internet or GitHub login. & pause & exit /b 1)
 git reset -q --hard origin/main
 echo Code updated. Installing any new libraries...
-if not exist .venv (py -3.11 -m venv .venv || python -m venv .venv)
+if not exist .venv\Scripts\python.exe (
+  echo Python environment not set up yet in this folder, running setup...
+  call setup_windows.bat
+  exit /b
+)
 call .venv\Scripts\activate.bat
 pip install -q -r requirements.txt
+if errorlevel 1 (echo Installing libraries failed, see the error above. & pause & exit /b 1)
 echo.
 echo Update done. Start it with run_windows.bat
 pause

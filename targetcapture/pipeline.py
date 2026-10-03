@@ -24,6 +24,13 @@ _INDEXERS: dict = {}
 Progress = Callable[[str, int, int, int, float], None]
 
 _END = object()
+_LIVE: dict = {}  # the run in progress: "timings" -> seconds per step so far
+
+
+def live_timing() -> dict:
+    """Seconds per step of the indexing run in progress ({} when none)."""
+    fn = _LIVE.get("timings")
+    return fn() if fn else {}
 
 
 class _Worker(threading.Thread):
@@ -166,6 +173,18 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
                               args=(info.path, {k: rates[k] for k in todo}, min(nxt.values()), motion_skip,
                                     hw, {"detect": detect}, stop, stats, out))
 
+    def timings() -> dict:
+        timing = {"decoding video": stats["decode"], "saving": stats["saving"]}
+        if detect.busy:
+            timing["people + vehicle detector"] = detect.busy
+        for ix in todo.values():
+            timing.update(getattr(ix, "timing", {}))
+        timing["total"] = time.perf_counter() - started
+        return timing
+
+    _LIVE["timings"] = timings
+    started = time.perf_counter()
+
     def save():
         t0 = time.perf_counter()
         for k in todo:
@@ -174,7 +193,7 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
             store.set_progress(media_id, k, nxt[k])  # commits; safe to stop and resume
         stats["saving"] += time.perf_counter() - t0
 
-    started, last_commit, running = time.perf_counter(), time.time(), set(todo)
+    last_commit, running = time.time(), set(todo)
     for w in (*workers.values(), detect):
         w.start()
     feeder.start()
@@ -223,13 +242,8 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
         store.set_progress(media_id, k, total, done=True)
         if progress:
             progress(k, total, total, found[k], info.duration)
-    timing = {"decoding video": stats["decode"], "saving": stats["saving"]}
-    if detect.busy:
-        timing["people + vehicle detector"] = detect.busy
-    for ix in todo.values():
-        timing.update(getattr(ix, "timing", {}))
-    timing["total"] = time.perf_counter() - started
-    return {**result, **found, "timing": timing}
+    _LIVE.clear()
+    return {**result, **found, "timing": timings()}
 
 
 def timing_lines(timing: dict, video_seconds: float) -> list[str]:
@@ -239,11 +253,19 @@ def timing_lines(timing: dict, video_seconds: float) -> list[str]:
         return []
     lines = [f"Indexed {video_seconds / 60:.1f} min of video in {total / 60:.1f} min: "
              f"{video_seconds / total:.1f}x real time (10 h of video in about {10 * total / max(video_seconds, 1e-6):.1f} h)."]
-    steps = sorted(((k, v) for k, v in timing.items() if k != "total" and v >= 0.05), key=lambda kv: -kv[1])
-    if steps:
-        lines.append("Time per step (steps run side by side, so they add up to more than the total): "
-                     + ", ".join(f"{k} {v:.0f} s" for k, v in steps))
+    line = step_line(timing)
+    if line:
+        lines.append(line)
     return lines
+
+
+def step_line(timing: dict) -> str:
+    total = timing.get("total") or 0.0
+    steps = sorted(((k, v) for k, v in timing.items() if k != "total" and v >= 0.05), key=lambda kv: -kv[1])
+    if not steps or total <= 0:
+        return ""
+    return ("Time per step (side by side, so they add up to more than the total): "
+            + ", ".join(f"{k} {v:.0f} s ({100 * v / total:.0f}%)" for k, v in steps))
 
 
 def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float,

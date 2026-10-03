@@ -55,7 +55,38 @@ def onnx_providers() -> list[str]:
             ort.preload_dlls()  # CUDA + cuDNN DLLs from the PyTorch install
         except Exception as e:
             log.warning("could not load CUDA libraries for ONNX Runtime: %s", e)
-    return ["CUDAExecutionProvider", *CPU]
+    # HEURISTIC: no slow search for the best kernels on every new input size; kSameAsRequested:
+    # grow GPU memory only as needed (4 GB cards such as the GTX 1650 run out otherwise, and Windows
+    # then quietly moves work to much slower shared memory)
+    return [("CUDAExecutionProvider", {"cudnn_conv_algo_search": "HEURISTIC",
+                                       "arena_extend_strategy": "kSameAsRequested"}), *CPU]
+
+
+def onnx_on_gpu() -> bool:
+    return onnx_providers()[0] != "CPUExecutionProvider"
+
+
+@functools.lru_cache(maxsize=None)
+def gpu_memory_gb() -> float:
+    """Memory of the NVIDIA card in GB (0 without one)."""
+    if not torch_cuda():
+        return 0.0
+    import torch
+
+    return torch.cuda.get_device_properties(0).total_memory / 1024 ** 3
+
+
+def gpu_memory_used() -> str | None:
+    """'2.1 of 4.0 GB' used on the card right now (all programs), None without a card."""
+    if not torch_cuda():
+        return None
+    try:
+        import torch
+
+        free, total = torch.cuda.mem_get_info()
+        return f"{(total - free) / 1024 ** 3:.1f} of {total / 1024 ** 3:.1f} GB"
+    except Exception:
+        return None
 
 
 def describe() -> str:
@@ -65,8 +96,8 @@ def describe() -> str:
         import torch
 
         name = torch.cuda.get_device_name(0)
-    if name and onnx_providers()[0] != "CPUExecutionProvider":
-        return f"GPU: {name}"
+    if name and onnx_on_gpu():
+        return f"GPU: {name} ({gpu_memory_gb():.0f} GB)"
     if name:
         return f"GPU for detection: {name} (plate reader and faces on CPU, run setup_gpu_windows.bat)"
     return "CPU only (for an NVIDIA GPU run setup_gpu_windows.bat)"

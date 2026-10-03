@@ -208,6 +208,10 @@ with tab_index:
         else:
             path = path_in
         bars, began, shown = {}, {}, {}
+        from targetcapture.video import probe
+
+        _v = probe(path)
+        vid_info = f"{_v.width}x{_v.height}, {_v.fps:.0f} frames/s"
         speed_line = st.empty()
 
         def progress(kind, i, total, found, t):
@@ -224,8 +228,15 @@ with tab_index:
                 shown["at"] = now
                 rate = (t - v0) / (now - t0)  # seconds of video per second
                 left = max(0.0, (total / max(1, i)) * t - t) / rate
-                speed_line.caption(f"Speed: {rate:.1f}x real time (10 h of video in about {10 / rate:.1f} h). "
-                                   f"About {fmt_offset(left)} left.")
+                from targetcapture.gpu import describe, gpu_memory_used
+                from targetcapture.pipeline import live_timing, step_line
+
+                mem = gpu_memory_used()
+                speed_line.caption(
+                    f"Speed: {rate:.1f}x real time (10 h of video in about {10 / rate:.1f} h). "
+                    f"About {fmt_offset(left)} left.  \n{step_line(live_timing())}  \n"
+                    f"{describe()}{f', graphics memory in use {mem}' if mem else ''}. "
+                    f"Video: {vid_info}.")
 
         r = C.rates(CFG, speed) if speed != "custom" else {"plate_fps": plate_fps, "person_fps": person_fps,
                                                            "model_looks": 4}
@@ -750,7 +761,7 @@ with tab_settings:
                                                   "arabic": "Arabic / Kurdish only"}.get)
         sizes = ["auto", "fast", "accurate"]
         n["car_model_size"] = c3.radio("Car model recognizer", sizes, index=sizes.index(CFG["car_model_size"]),
-                                       format_func={"auto": "Auto (accurate with an NVIDIA GPU)",
+                                       format_func={"auto": "Auto (accurate on a GPU with 6 GB or more)",
                                                     "fast": "Fast (600 MB)",
                                                     "accurate": "Accurate, slower (1.7 GB download)"}.get)
         n["vehicle_crops"] = c2.checkbox("Read plates inside each vehicle (slower)", CFG["vehicle_crops"])

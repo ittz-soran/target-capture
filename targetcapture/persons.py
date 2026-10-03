@@ -37,7 +37,8 @@ class FaceModel:
         providers = providers or onnx_providers()
         self.app = FaceAnalysis(name=name, providers=list(providers),
                                 allowed_modules=["detection", "recognition"])
-        self.app.prepare(ctx_id=0 if providers[0] == "CUDAExecutionProvider" else -1, det_size=(640, 640))
+        on_gpu = (providers[0][0] if isinstance(providers[0], tuple) else providers[0]) == "CUDAExecutionProvider"
+        self.app.prepare(ctx_id=0 if on_gpu else -1, det_size=(640, 640))
         self.det = self.app.det_model
         self.rec = self.app.models["recognition"]
 

@@ -36,12 +36,13 @@ def load_names(path: str = DEFAULT_LIST) -> list[str]:
 
 
 def resolve_size(size: str = "auto") -> str:
-    """'auto': the accurate model on an NVIDIA GPU, the fast one on CPU."""
+    """'auto': the accurate model on an NVIDIA GPU with 6 GB or more, else the fast one (on a
+    4 GB card such as the GTX 1650 the accurate one leaves too little memory for the others)."""
     if size in MODELS:
         return size
-    from .gpu import torch_cuda
+    from .gpu import gpu_memory_gb
 
-    return "accurate" if torch_cuda() else "fast"
+    return "accurate" if gpu_memory_gb() >= 5.5 else "fast"
 
 
 def _weights(size: str) -> str:

@@ -85,12 +85,12 @@ def open_video(path: str, hw: bool = True) -> cv2.VideoCapture:
     (NVIDIA, Intel or AMD; much less CPU on long 1080p/4K H.264/H.265 files). Falls back to
     normal decoding by itself."""
     if hw and hasattr(cv2, "VIDEO_ACCELERATION_ANY"):
-        params = [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY]
-        if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):  # turn phone videos upright, like normal decoding
-            params += [cv2.CAP_PROP_ORIENTATION_AUTO, 1]
         try:
-            cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
+            cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG,
+                                   [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
             if cap.isOpened():
+                if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):  # phone videos upright, like normal decoding
+                    cap.set(cv2.CAP_PROP_ORIENTATION_AUTO, 1)
                 return cap
             cap.release()
         except cv2.error:

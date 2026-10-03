@@ -104,7 +104,7 @@ def iter_frames(
     motion_threshold: float = 1.5,
     max_still: float = 5.0,
     prefetch: int = 16,
-    hw: bool = True,
+    hw: bool = False,
 ) -> Iterator[Frame]:
     """Yield sampled frames. For an image, yields the image once. The video is decoded in a
     background thread, so decoding the next frames overlaps with the detectors' work."""
@@ -219,10 +219,23 @@ def read_frame(path: str, index: int, sig: np.ndarray | None = None, window: flo
     returned; None if it cannot be found."""
     if is_image(path):
         return cv2.imread(path)
-    cap = cv2.VideoCapture(path)
+    img = _read_frame(cv2.VideoCapture(path), index, sig, window)
+    if img is None and sig is not None and hasattr(cv2, "VIDEO_ACCELERATION_ANY"):
+        # indexed with graphics-card decoding (an earlier version), whose pictures differ a
+        # little (colours, rotation of phone videos): look again with the same decoder
+        img = _read_frame(open_video(path, hw=True), index, sig, window)
+    if img is None and sig is not None:
+        # still not found (e.g. the video file was replaced or re-encoded): take the closest
+        # frame if it is clearly the same scene, rather than showing no picture at all
+        img = _read_frame(cv2.VideoCapture(path), index, sig, window, limit=4 * MATCH)
+    return img
+
+
+def _read_frame(cap, index, sig, window, limit=None):
+    limit = limit or MATCH
     cap.set(cv2.CAP_PROP_POS_FRAMES, index)
     ok, img = cap.read()
-    if sig is None or (ok and _sig_diff(img, sig) < MATCH):
+    if sig is None or (ok and _sig_diff(img, sig) < limit):
         cap.release()
         return img if ok else None
     fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
@@ -241,7 +254,7 @@ def read_frame(path: str, index: int, sig: np.ndarray | None = None, window: flo
             if d < MATCH / 3:
                 break
     cap.release()
-    return best_img if best < MATCH else None
+    return best_img if best < limit else None
 
 
 def seeks_exactly(path: str, info: MediaInfo | None = None, nearly: bool = False) -> bool:

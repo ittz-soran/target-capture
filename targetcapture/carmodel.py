@@ -92,10 +92,11 @@ class CarModelClassifier:
         if crop is None or crop.size == 0 or min(crop.shape[:2]) < 32:
             return None
         img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-        with self.torch.no_grad():
+        with self.torch.no_grad(), self.torch.autocast("cuda", enabled=self.device == "cuda"):
+            # half precision on an NVIDIA card: about twice as fast, same answers
             x = self.preprocess(img).unsqueeze(0)
             x = self.torch.cat([x, x.flip(-1)]).to(self.device)
-            f = self.model.encode_image(x)
+            f = self.model.encode_image(x).float()
             f = f / f.norm(dim=-1, keepdim=True)
             return (100.0 * f @ self.text.T).softmax(dim=-1).mean(0).cpu().numpy()
 

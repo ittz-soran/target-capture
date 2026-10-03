@@ -223,6 +223,7 @@ Several videos can go into one index (`--db` picks the file, default `targetcapt
 
 | Option | Default | What it does |
 |---|---|---|
+| `index --speed` | (none) | `fast` (plates 3, people 2 frames per second), `balanced` (4 / 3) or `thorough` (6 / 4). Overrides the two rates below. The web page uses the Speed choice (default Fast). |
 | `index --plate-fps` | 4 | Frames per second checked for plates. Raise for fast traffic. |
 | `index --person-fps` | 3 | Frames per second checked for people. |
 | `index --vehicle-crops` | off | Also reads plates inside each detected vehicle. Slower; helps on wide or 4K views where plates are tiny. |
@@ -238,7 +239,20 @@ Several videos can go into one index (`--db` picks the file, default `targetcapt
 Measured on a 4-core CPU with no GPU: person indexing processed about 8 analysed frames per second on a 768x432 clip with 1 to 3 people in view, and plate indexing took 6 s for a 1-minute 720p clip.
 At those rates a 5-hour busy 1080p street video would take a few hours on CPU; a GPU is typically 5 to 20 times faster. Searching an existing index takes seconds.
 
+After each video, the page (and the command line) shows how fast it went, as "× real time" with the time for
+10 hours of video, and which step took the time. Indexing 10 hours in 1 hour means 10× real time; reaching it
+needs an NVIDIA GPU (setup_gpu_windows.bat) and the Fast speed. On a 4-core CPU with no GPU it is about 3 to 8×
+real time depending on how busy the road is.
+
 Recent speed-ups (same results, less work):
+
+* Each video is decoded once for plates and people (it used to be decoded twice), and one detector run finds
+  both people and vehicles in a frame (it used to be two runs). The plate reader and the face reader work side by
+  side in their own threads while the next frames are decoded. On a 4-core CPU this made indexing 1.4 to 1.7×
+  faster at the same settings.
+* Speed choice: Fast looks at 3 frames a second for plates and 2 for people and works out each car's model
+  from 2 views; most plates and faces are still seen several times as they pass.
+* The car model recognizer runs in half precision on an NVIDIA GPU.
 
 * Models are loaded once and reused for every video in a batch and for every live camera piece.
 * Faces are read only when useful: the first 3 per person, then every 0.6 s or when the person gets clearly bigger. On a busy town clip this halved person indexing time (478 s to 238 s) with identical search results.

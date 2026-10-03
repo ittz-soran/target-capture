@@ -113,8 +113,8 @@ def run(db_path: str, root: str = "recordings", keep_days: float | None = None, 
     cfg = settings.load()
     keep_days = cfg["keep_days"] if keep_days is None else keep_days
     segment = int(cfg["segment_seconds"]) if segment is None else segment
-    opts = {k: cfg[k] for k in ("plate_fps", "person_fps", "plate_script", "car_models", "vehicle_crops",
-                                "min_ocr_conf")}
+    opts = {k: cfg[k] for k in ("plate_script", "car_models", "vehicle_crops", "min_ocr_conf")}
+    opts.update(settings.rates(cfg))  # speed choice of the Settings tab
     opts["skip_empty_road"] = cfg["skip_empty_road"]
 
     store = Store(db_path)

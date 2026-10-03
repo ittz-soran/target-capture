@@ -88,8 +88,10 @@ def teach(store, ids: list[int], best, label: str, not_a_plate: bool = False) ->
         store.delete_plate_reads(ids)
     else:
         store.set_plate_text(ids, label, "taught")
-    sig = None if not_a_plate else row_signature(store, best)
-    store.add_label(best, ocr_text, label, None if sig is None else sig.tobytes())
+    crop = None if not_a_plate else crop_of(best, store.frame(best))
+    sig = plate_signature(crop) if crop is not None else None
+    png = cv2.imencode(".png", crop)[1].tobytes() if crop is not None else None
+    store.add_label(best, ocr_text, label, None if sig is None else sig.tobytes(), png)
     same_mistake = [r["id"] for r in store.reads_with_text(ocr_text)] if ocr_text and label else []
     return {"label": label, "ocr_text": ocr_text, "fixed": len(ids), "same_mistake": same_mistake, "sig": sig}
 
@@ -106,21 +108,27 @@ def similar_captures(store, sig: np.ndarray, candidates: list[dict], min_sim: fl
     return sorted(out, key=lambda x: -x[0])
 
 
-def export(store, out_dir: str) -> int:
-    """Write every taught plate as an image + labels.csv (for training a plate reader)."""
+def export(store, out_dir: str) -> tuple[int, int]:
+    """Write every taught plate as an image + labels.csv (for training a plate reader).
+    Returns (plates written, plates whose picture is gone with their removed video)."""
     os.makedirs(os.path.join(out_dir, "images"), exist_ok=True)
-    n = 0
+    n = missing = 0
     with open(os.path.join(out_dir, "labels.csv"), "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(["image_path", "plate_text", "ocr_said"])
         for lab in store.labels():
             if not lab["label"]:
                 continue
-            crop = crop_of(lab, store.frame(lab))
-            if crop is None or crop.size == 0:
+            crop = None
+            if lab["crop"]:  # saved when it was taught
+                crop = cv2.imdecode(np.frombuffer(lab["crop"], np.uint8), cv2.IMREAD_COLOR)
+            if crop is None:
+                crop = crop_of(lab, store.frame(lab))
+            if crop is None or crop.size == 0:  # its video was removed before pictures were kept
+                missing += 1
                 continue
             name = f"images/{lab['id']:05d}.png"
             cv2.imwrite(os.path.join(out_dir, name), crop)
             w.writerow([name, lab["label"], lab["ocr_text"]])
             n += 1
-    return n
+    return n, missing

@@ -16,6 +16,7 @@ DEFAULTS = {
     # Indexing (defaults of the Upload & index tab; live cameras use them too)
     "read_plates": True,
     "find_people": True,
+    "speed": "fast",          # SPEEDS below, or "custom" (the two frame rates that follow)
     "plate_fps": 4.0,
     "person_fps": 3.0,
     "plate_script": "auto",
@@ -37,6 +38,24 @@ DEFAULTS = {
     "db_path": "targetcapture.db",
     "max_upload_mb": 20000,   # read by run_windows.bat when the page starts
 }
+
+# How much of each second of video is looked at. Most plates and faces are seen in several
+# frames, so fewer frames lose little and index much faster.
+SPEEDS = {
+    "fast": {"plate_fps": 3.0, "person_fps": 2.0, "model_looks": 2},
+    "balanced": {"plate_fps": 4.0, "person_fps": 3.0, "model_looks": 4},
+    "thorough": {"plate_fps": 6.0, "person_fps": 4.0, "model_looks": 4},
+}
+SPEED_NAMES = {"fast": "Fast (long recordings)", "balanced": "Balanced",
+               "thorough": "Thorough (slowest, catches the most)", "custom": "Custom frame rates"}
+
+
+def rates(cfg: dict, speed: str | None = None) -> dict:
+    """plate_fps, person_fps and model_looks for a speed choice (cfg's own when None)."""
+    speed = speed or cfg["speed"]
+    if speed in SPEEDS:
+        return dict(SPEEDS[speed])
+    return {"plate_fps": float(cfg["plate_fps"]), "person_fps": float(cfg["person_fps"]), "model_looks": 4}
 
 
 def load(path: str = PATH) -> dict:

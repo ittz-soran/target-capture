@@ -26,6 +26,8 @@ class Frame:
     index: int        # frame number in the source (0 for a still image)
     t: float          # seconds from the start of the video
     image: np.ndarray  # BGR
+    kinds: tuple = ()  # iter_frames with several rates: which of them this frame is for
+    dets: dict | None = None  # people and vehicles found by the shared detector (pipeline.Detector)
 
 
 @dataclass
@@ -100,7 +102,7 @@ def open_video(path: str, hw: bool = True) -> cv2.VideoCapture:
 
 def iter_frames(
     path: str,
-    sample_fps: float,
+    sample_fps: float | dict,
     start_frame: int = 0,
     motion_skip: bool = True,
     motion_threshold: float = 1.5,
@@ -109,18 +111,21 @@ def iter_frames(
     hw: bool = False,
 ) -> Iterator[Frame]:
     """Yield sampled frames. For an image, yields the image once. The video is decoded in a
-    background thread, so decoding the next frames overlaps with the detectors' work."""
+    background thread, so decoding the next frames overlaps with the detectors' work.
+    sample_fps can be {kind: fps} (e.g. {"plates": 4, "persons": 3}): the video is then decoded
+    once for all of them and each frame's .kinds says which ones it is sampled for."""
     info = probe(path)
     if info.kind == "image":
         if start_frame == 0:
-            yield Frame(0, 0.0, cv2.imread(path))
+            yield Frame(0, 0.0, cv2.imread(path), tuple(sample_fps) if isinstance(sample_fps, dict) else ())
         return
     frames = _sampled(path, info, sample_fps, start_frame, motion_skip, motion_threshold, max_still, hw)
     yield from (_prefetched(frames, prefetch) if prefetch > 0 else frames)
 
 
 def _sampled(path, info, sample_fps, start_frame, motion_skip, motion_threshold, max_still, hw):
-    step = max(1, round(info.fps / sample_fps))
+    rates = sample_fps if isinstance(sample_fps, dict) else {"": sample_fps}
+    steps = {k: max(1, round(info.fps / f)) for k, f in rates.items()}
     cap = open_video(path, hw)
     if start_frame:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
@@ -129,7 +134,8 @@ def _sampled(path, info, sample_fps, start_frame, motion_skip, motion_threshold,
     last_t = -1e9
     try:
         while True:
-            if i % step:
+            kinds = tuple(k for k, st in steps.items() if i % st == 0)
+            if not kinds:
                 if not cap.grab():  # grab() skips the colour conversion of read()
                     break
                 i += 1
@@ -146,7 +152,7 @@ def _sampled(path, info, sample_fps, start_frame, motion_skip, motion_threshold,
                     continue
                 last_sig = sig
             last_t = t
-            yield Frame(i, t, img)
+            yield Frame(i, t, img, kinds if isinstance(sample_fps, dict) else ())
             i += 1
     finally:
         cap.release()

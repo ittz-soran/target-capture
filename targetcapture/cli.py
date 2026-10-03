@@ -44,8 +44,10 @@ def cmd_index(a):
         print(f"{path}: {info.kind}, {info.width}x{info.height}, {info.fps:.1f} fps, "
               f"{fmt_offset(info.duration)} long")
         bars.clear()
-        res = index_media(store, path, plates=do_plates, persons=do_persons, plate_fps=a.plate_fps,
-                          person_fps=a.person_fps, clock_start=a.clock_start, min_ocr_conf=a.min_ocr_conf,
+        from .settings import SPEEDS
+
+        r = SPEEDS[a.speed] if a.speed else {"plate_fps": a.plate_fps, "person_fps": a.person_fps, "model_looks": 4}
+        res = index_media(store, path, plates=do_plates, persons=do_persons, **r, clock_start=a.clock_start, min_ocr_conf=a.min_ocr_conf,
                           vehicle_crops=a.vehicle_crops, plate_script=a.plate_script, car_models=not a.no_car_model, motion_skip=not a.no_motion_skip,
                           reindex=a.reindex, progress=progress, skip_empty_road=a.skip_empty_road)
         for bar in bars.values():
@@ -54,6 +56,10 @@ def cmd_index(a):
             if kind in res:
                 n = res[kind]
                 print(f"[{kind}] " + ("already indexed (use --reindex to redo)" if n < 0 else f"{n} detections stored"))
+        if res.get("timing") and info.kind == "video":
+            from .pipeline import timing_lines
+
+            print("\n".join(timing_lines(res["timing"], info.duration)))
 
 
 def _slug(s):
@@ -116,8 +122,10 @@ def cmd_find_person(a):
 def cmd_export_taught(a):
     from .teach import export
 
-    n = export(Store(a.db), a.out)
+    n, missing = export(Store(a.db), a.out)
     print(f"Wrote {n} taught plate(s) to {a.out} (images/ + labels.csv)")
+    if missing:
+        print(f"Skipped {missing}: their videos were removed before plate pictures were kept")
 
 
 def cmd_remove(a):
@@ -166,6 +174,8 @@ def main(argv=None):
     s.add_argument("media", nargs="+")
     s.add_argument("--plates", action="store_true", help="only index plates")
     s.add_argument("--persons", action="store_true", help="only index persons")
+    s.add_argument("--speed", choices=["fast", "balanced", "thorough"],
+                   help="preset frame rates (overrides --plate-fps / --person-fps)")
     s.add_argument("--plate-fps", type=float, default=4.0, help="frames/second analysed for plates")
     s.add_argument("--person-fps", type=float, default=3.0, help="frames/second analysed for persons")
     s.add_argument("--clock-start", help='DVR wall-clock time of the first frame, e.g. "2026-09-30 08:00:00"')

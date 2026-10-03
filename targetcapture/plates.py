@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from collections import Counter, defaultdict
 
 import cv2
@@ -78,6 +79,8 @@ class PlateIndexer:
         self.min_chars = min_chars
         self.vehicle_crops = vehicle_crops
         self._t, self._latin_seen = 0.0, []
+        self.timing: dict[str, float] = {}  # seconds spent per step (shown after indexing)
+        self.max_model_looks = 4   # make/model looks per vehicle (fewer = faster)
         self.memory = memory  # teach.Memory: corrections typed in the Teach tab
         self.min_unread_det = 0.55  # unreadable plates are kept only when the detector is this sure
         # Make / model ("Toyota Corolla") of the vehicle carrying each plate
@@ -106,11 +109,15 @@ class PlateIndexer:
             except Exception as e:  # model file missing or onnxruntime problem: general reader only
                 log.warning("Iraqi plate reader not loaded: %s", e)
 
-    def _vehicles(self, img):
-        """Vehicles in the frame with a track id each: [(type, [x1, y1, x2, y2], track_id)]."""
-        res = self.vehicles.predict(img, classes=list(VEHICLE_CLASSES), conf=0.3, verbose=False, **half())[0]
-        dets = [(VEHICLE_CLASSES[int(cls)], [int(v) for v in box])
-                for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy())]
+    def _vehicles(self, img, found=None):
+        """Vehicles in the frame with a track id each: [(type, [x1, y1, x2, y2], track_id)].
+        found: [(type, box)] already detected by the shared detector, else detected here."""
+        if found is not None:
+            dets = [(vtype, list(box)) for vtype, box in found]
+        else:
+            res = self.vehicles.predict(img, classes=list(VEHICLE_CLASSES), conf=0.3, verbose=False, **half())[0]
+            dets = [(VEHICLE_CLASSES[int(cls)], [int(v) for v in box])
+                    for box, cls in zip(res.boxes.xyxy.cpu().numpy(), res.boxes.cls.cpu().numpy())]
         # drop a box lying mostly inside a bigger one (a second detection of part of the same vehicle)
         dets.sort(key=lambda d: -(d[1][2] - d[1][0]) * (d[1][3] - d[1][1]))
         kept = []
@@ -126,7 +133,9 @@ class PlateIndexer:
         is clearly closer), not on every frame: the model is the slowest step of plate indexing.
         The looks are added up, bigger views counting more, so one odd angle does not decide."""
         x1, y1, x2, y2 = box
-        body = img[y1 + (y2 - y1) // 6: y1 + (y2 - y1) // 2, x1 + (x2 - x1) // 6: x2 - (x2 - x1) // 6]
+        # bonnet / doors / boot: the upper part is mostly windscreen, which shows the sky (a white
+        # car came out "blue")
+        body = img[y1 + int((y2 - y1) * 0.35): y1 + int((y2 - y1) * 0.75), x1 + (x2 - x1) // 6: x2 - (x2 - x1) // 6]
         info = {"vehicle_type": vtype, "vehicle_color": dominant_color(body), "vehicle_model": None,
                 "model_conf": None}
         if self.models is None or vtype not in ("car", "truck"):
@@ -134,10 +143,12 @@ class PlateIndexer:
         area = (x2 - x1) * (y2 - y1)
         new = {"area": 0, "model": None, "conf": None, "runs": 0, "saved": -1e9, "p": None}
         tr = self._tracks.setdefault(tid, new) if tid is not None else new
-        if tr["runs"] == 0 or (area > 1.3 * tr["area"] and tr["runs"] < 4):
+        if tr["runs"] == 0 or (area > 1.3 * tr["area"] and tr["runs"] < self.max_model_looks):
             # a little margin around the box: bumpers and mirrors help tell models apart
             mx, my = (x2 - x1) // 20, (y2 - y1) // 20
+            t0 = time.perf_counter()
             p = self.models.probs(img[max(0, y1 - my):y2 + my, max(0, x1 - mx):x2 + mx])
+            _add(self.timing, "car make/model", t0)
             tr.update(area=area, runs=tr["runs"] + 1)
             if p is not None:
                 w = float(np.sqrt(area))
@@ -159,14 +170,19 @@ class PlateIndexer:
             conf = float(np.mean(conf)) if isinstance(conf, (list, tuple, np.ndarray)) else float(conf or 0)
             b = r.detection.bounding_box
             box = {"x1": b.x1 + ox, "y1": b.y1 + oy, "x2": b.x2 + ox, "y2": b.y2 + oy}
+            guess = text
             if self.iraq is not None:
                 text, conf = self._iraq_pick(img, b, text, conf)
+                if _junk(text):
+                    # fewer than 4 digits and no plate pattern: letters of the Arabic words read
+                    # as English ("ELL111" from "العراق"). Kept as an unread capture instead.
+                    text, conf = "", 0.0
             if len(text) < self.min_chars or conf < self.min_ocr_conf:
                 # Detected but not readable (e.g. a non-Latin plate, blur, too small): keep the
                 # capture so it can be checked by eye.
                 if r.detection.confidence >= self.min_unread_det:
                     reads.append({"text": "", "conf": float(r.detection.confidence), "region": None,
-                                  "ocr_guess": text or None, **box})
+                                  "ocr_guess": text or guess or None, **box})
                 continue
             text, code_region = strip_codes(text)
             region = code_region
@@ -200,10 +216,12 @@ class PlateIndexer:
         from .plateocr import plausible
 
         iq, iq_conf, layout = self.iraq.read(self._plate_crop(img, b))
+        general = strip_codes(text)[0].replace(" ", "")
+        if _junk(general):  # the general read is no plate number: a fair Iraqi read is better
+            sure = min(sure, 0.5)
         if not iq or iq_conf < sure or not plausible(iq) or len(iq) < self.min_chars:
             return text, conf
-        general = strip_codes(text)[0].replace(" ", "")
-        if (conf < self.min_ocr_conf or len(text) < self.min_chars
+        if (conf < self.min_ocr_conf or len(text) < self.min_chars or _junk(general)
                 or (layout == "two-line" and not plausible(general))):
             return iq, iq_conf
         return text, conf
@@ -229,7 +247,9 @@ class PlateIndexer:
         Arabic read (text '' if it could not be read)."""
         from .arabic import has_arabic
 
+        t0 = time.perf_counter()
         text, conf, details, raw = self.arabic.read(self._plate_crop(img, b))
+        _add(self.timing, "Arabic plate check", t0)
         region = ", ".join(str(v) for k, v in details.items() if k != "other_text") or None
         if not has_arabic(raw):
             return region or ""
@@ -262,7 +282,11 @@ class PlateIndexer:
         img = frame.image
         self._t = frame.t
         self._latin_seen = [e for e in self._latin_seen if frame.t - e[0] <= 1.5]
-        vehicles = self._vehicles(img)
+        t0 = time.perf_counter()
+        shared = frame.dets.get("vehicles") if getattr(frame, "dets", None) else None
+        vehicles = self._vehicles(img, shared)
+        if shared is None:
+            _add(self.timing, "vehicle detector", t0)
         infos = {}
         for vtype, box, tid in vehicles:
             info = infos[tuple(box)] = self._vehicle_info(img, vtype, box, tid)
@@ -278,6 +302,7 @@ class PlateIndexer:
         # detector handles, e.g. steep top-down cameras). Single photos are always read.
         if not vehicles and frame.index > 0 and self.skip_empty:
             return []
+        t0, arabic0 = time.perf_counter(), self.timing.get("Arabic plate check", 0.0)
         reads = self._read(img)
         if self.vehicle_crops:
             # Two-stage: also read plates inside each vehicle crop. Helps on wide,
@@ -286,6 +311,7 @@ class PlateIndexer:
                 for r in self._read(img[y1:y2, x1:x2], x1, y1):
                     if not any(_iou(r, o) > 0.3 for o in reads):
                         reads.append(r)
+        _add(self.timing, "plate reader", t0 + self.timing.get("Arabic plate check", 0.0) - arabic0)
         if not reads:
             return []
         if self.memory:
@@ -315,10 +341,23 @@ class PlateIndexer:
         self._tracker = _BoxTracker(first_id=track_offset)
         self._tracks, self.vehicle_rows = {}, []
         self._t, self._latin_seen = 0.0, []
+        self.timing = {}
 
     def drain_vehicles(self) -> list[dict]:
         rows, self.vehicle_rows = self.vehicle_rows, []
         return rows
+
+
+def _junk(text: str) -> bool:
+    """A read that cannot be a plate number: under 4 digits and no Iraqi plate pattern."""
+    from .plateocr import plausible
+
+    text = strip_codes(text)[0].replace(" ", "") if text else ""
+    return bool(text) and sum(c.isdigit() for c in text) < 4 and not plausible(text)
+
+
+def _add(timing: dict, step: str, t0: float):
+    timing[step] = timing.get(step, 0.0) + time.perf_counter() - t0
 
 
 class _BoxTracker:

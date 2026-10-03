@@ -16,6 +16,7 @@ turned away.
 from __future__ import annotations
 
 import logging
+import time
 from collections import Counter
 
 import cv2
@@ -83,6 +84,7 @@ class PersonIndexer:
         self._untracked = -1
         self._face_try: dict[int, tuple] = {}
         self._faces_seen: dict[int, int] = {}
+        self.timing: dict[str, float] = {}  # seconds spent per step (shown after indexing)
 
     def start(self, track_offset: int = 0):
         """Get ready for a new video: fresh tracker, same (slow to load) face model."""
@@ -92,6 +94,8 @@ class PersonIndexer:
         self.track_offset = track_offset
         self._untracked = -1
         self._face_try, self._faces_seen = {}, {}
+        self.timing = {}
+        self._bt = _byte_tracker(self.tracker)
 
     def _face_due(self, tid: int, t: float, h: int) -> bool:
         """Look for a face on this person now? Every frame for their first 3 faces, then about
@@ -131,12 +135,24 @@ class PersonIndexer:
 
     def process(self, frame) -> list[dict]:
         img = frame.image
-        res = self.yolo.track(img, persist=True, classes=[0], conf=0.35, tracker=self.tracker, verbose=False,
-                              **half())[0]
-        if res.boxes is None or len(res.boxes) == 0:
-            return []
-        boxes = res.boxes.xyxy.cpu().numpy().astype(int)
-        ids = res.boxes.id.cpu().numpy().astype(int) if res.boxes.id is not None else None
+        shared = frame.dets.get("persons") if getattr(frame, "dets", None) and self._bt is not None else None
+        if shared is not None:
+            # people already found by the shared detector (one detector run for people and
+            # vehicles): only follow them from frame to frame here
+            tracks = self._bt.update(shared, img) if len(shared) else []
+            if len(tracks) == 0:
+                return []
+            boxes = np.asarray(tracks)[:, :4].astype(int)
+            ids = np.asarray(tracks)[:, 4].astype(int)
+        else:
+            t0 = time.perf_counter()
+            res = self.yolo.track(img, persist=True, classes=[0], conf=0.35, tracker=self.tracker, verbose=False,
+                                  **half())[0]
+            self.timing["people detector"] = self.timing.get("people detector", 0.0) + time.perf_counter() - t0
+            if res.boxes is None or len(res.boxes) == 0:
+                return []
+            boxes = res.boxes.xyxy.cpu().numpy().astype(int)
+            ids = res.boxes.id.cpu().numpy().astype(int) if res.boxes.id is not None else None
         rows = []
         for k, (x1, y1, x2, y2) in enumerate(boxes):
             if ids is not None:
@@ -148,14 +164,42 @@ class PersonIndexer:
                    "x1": int(x1), "y1": int(y1), "x2": int(x2), "y2": int(y2),
                    **_clothing(img, int(x1), int(y1), int(x2), int(y2)),
                    "emb": None}
-            f = self._face_in_person(img, (int(x1), int(y1), int(x2), int(y2))) \
-                if self._face_due(tid, frame.t, int(y2 - y1)) else None
+            f = None
+            if self._face_due(tid, frame.t, int(y2 - y1)):
+                t0 = time.perf_counter()
+                f = self._face_in_person(img, (int(x1), int(y1), int(x2), int(y2)))
+                self.timing["faces"] = self.timing.get("faces", 0.0) + time.perf_counter() - t0
             if f is not None:
                 self._faces_seen[tid] = self._faces_seen.get(tid, 0) + 1
                 fb, score, emb = f
                 row.update(fx1=fb[0], fy1=fb[1], fx2=fb[2], fy2=fb[3], face_score=score, emb=emb)
             rows.append(row)
         return rows
+
+
+def _byte_tracker(cfg_name: str):
+    """A ByteTrack tracker fed with ready-made detections (None if this Ultralytics version
+    does not allow it: people are then detected and tracked by the person model itself)."""
+    try:
+        from ultralytics.trackers.byte_tracker import BYTETracker
+        from ultralytics.utils import IterableSimpleNamespace
+        from ultralytics.utils.checks import check_yaml
+
+        try:
+            from ultralytics.utils import YAML
+
+            cfg = YAML.load(check_yaml(cfg_name))
+        except ImportError:
+            from ultralytics.utils import yaml_load
+
+            cfg = yaml_load(check_yaml(cfg_name))
+        try:
+            return BYTETracker(args=IterableSimpleNamespace(**cfg))
+        except TypeError:  # older Ultralytics
+            return BYTETracker(IterableSimpleNamespace(**cfg), frame_rate=30)
+    except Exception as e:
+        log.info("shared detection off for people: %s", e)
+        return None
 
 
 def _clothing(img, x1, y1, x2, y2):

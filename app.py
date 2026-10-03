@@ -180,9 +180,15 @@ with tab_index:
     do_plates = c1.checkbox("Read plates", CFG["read_plates"])
     do_persons = c2.checkbox("Find people", CFG["find_people"])
     clock = c3.text_input("DVR clock at first frame (optional)", placeholder="2026-09-30 08:00:00")
+    speeds = list(C.SPEED_NAMES)
+    speed = st.radio("Speed", speeds, index=speeds.index(CFG["speed"]), format_func=C.SPEED_NAMES.get,
+                     horizontal=True, help="Fast suits long DVR recordings. Thorough catches a few more plates on "
+                                           "fast cars. Custom: set the frame rates under Advanced.")
     with st.expander("Advanced"):
-        plate_fps = st.slider("Frames per second analysed for plates", 1.0, 10.0, float(CFG["plate_fps"]))
-        person_fps = st.slider("Frames per second analysed for people", 1.0, 10.0, float(CFG["person_fps"]))
+        plate_fps = st.slider("Frames per second analysed for plates (Custom speed)", 1.0, 10.0,
+                              float(CFG["plate_fps"]), disabled=speed != "custom")
+        person_fps = st.slider("Frames per second analysed for people (Custom speed)", 1.0, 10.0,
+                               float(CFG["person_fps"]), disabled=speed != "custom")
         plate_script = st.radio("Plate script", SCRIPTS, horizontal=True, index=SCRIPTS.index(CFG["plate_script"]),
                                 format_func=lambda v: {"auto": "Auto (English and Arabic)",
                                                        "latin": "English only (fastest)",
@@ -201,19 +207,36 @@ with tab_index:
                 shutil.copyfileobj(up, f, 16 << 20)
         else:
             path = path_in
-        bars = {}
+        bars, began, shown = {}, {}, {}
+        speed_line = st.empty()
 
         def progress(kind, i, total, found, t):
+            import time
+
+            now = time.time()
             if kind not in bars:
                 bars[kind] = st.progress(0.0)
+                began[kind] = (now, t)
             bars[kind].progress(min(1.0, i / max(1, total)),
                                 text=f"{kind}: {fmt_offset(t)} analysed, {found} detections")
+            t0, v0 = began[kind]
+            if now - shown.get("at", 0) > 1 and now - t0 > 5 and t > v0:
+                shown["at"] = now
+                rate = (t - v0) / (now - t0)  # seconds of video per second
+                left = max(0.0, (total / max(1, i)) * t - t) / rate
+                speed_line.caption(f"Speed: {rate:.1f}x real time (10 h of video in about {10 / rate:.1f} h). "
+                                   f"About {fmt_offset(left)} left.")
 
-        res = index_media(store, path, plates=do_plates, persons=do_persons, plate_fps=plate_fps,
-                          person_fps=person_fps, clock_start=clock or None, vehicle_crops=vehicle_crops, plate_script=plate_script, car_models=car_models,
+        r = C.rates(CFG, speed) if speed != "custom" else {"plate_fps": plate_fps, "person_fps": person_fps,
+                                                           "model_looks": 4}
+        res = index_media(store, path, plates=do_plates, persons=do_persons, **r, clock_start=clock or None, vehicle_crops=vehicle_crops, plate_script=plate_script, car_models=car_models,
                           reindex=reindex, progress=progress, skip_empty_road=skip_empty,
                           min_ocr_conf=CFG["min_ocr_conf"])
         st.success(f"Indexed {os.path.basename(path)}. Now search it in the next tabs.")
+        if res.get("timing") and res["info"].kind == "video":
+            from targetcapture.pipeline import timing_lines
+
+            speed_line.caption("  \n".join(timing_lines(res["timing"], res["info"].duration)))
         if res.get("alerts"):
             st.error(f"{len(res['alerts'])} watch-list match(es) in this video: see the Watch list tab.")
 
@@ -634,8 +657,11 @@ with tab_teach:
         n_labels = len([lab for lab in store.labels() if lab["label"]])
         st.caption(f"{n_labels} plate(s) taught so far.")
         if st.button("Export to results/taught_plates", disabled=not n_labels):
-            n = T.export(store, os.path.join(RESULTS, "taught_plates"))
+            n, missing = T.export(store, os.path.join(RESULTS, "taught_plates"))
             st.success(f"Wrote {n} plate pictures and labels.csv to {os.path.join(RESULTS, 'taught_plates')}")
+            if missing:
+                st.info(f"{missing} taught plate(s) were skipped: their videos were removed from the index "
+                        "before this version, so their pictures are gone. They still correct new readings.")
 
 with tab_tips:
     st.markdown(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TIPS.md"), encoding="utf-8").read())
@@ -710,9 +736,13 @@ with tab_settings:
         n["read_plates"] = c1.checkbox("Read plates", CFG["read_plates"])
         n["find_people"] = c2.checkbox("Find people", CFG["find_people"])
         n["car_models"] = c3.checkbox("Car make and model", CFG["car_models"])
-        n["plate_fps"] = c1.slider("Frames per second for plates", 1.0, 10.0, float(CFG["plate_fps"]),
+        speeds = list(C.SPEED_NAMES)
+        n["speed"] = c1.radio("Indexing speed", speeds, index=speeds.index(CFG["speed"]), format_func=C.SPEED_NAMES.get,
+                              help="Fast looks at fewer frames per second (plates 3, people 2): most plates and "
+                                   "faces are still seen several times. Custom uses the two frame rates below.")
+        n["plate_fps"] = c2.slider("Custom: frames per second for plates", 1.0, 10.0, float(CFG["plate_fps"]),
                                    help="Higher reads more plates on fast cars but is slower.")
-        n["person_fps"] = c2.slider("Frames per second for people", 1.0, 10.0, float(CFG["person_fps"]))
+        n["person_fps"] = c3.slider("Custom: frames per second for people", 1.0, 10.0, float(CFG["person_fps"]))
         n["min_ocr_conf"] = c3.slider("Minimum plate read confidence", 0.2, 0.9, float(CFG["min_ocr_conf"]), 0.05,
                                       help="Lower keeps more (and more wrong) reads.")
         n["plate_script"] = c1.radio("Plate script", SCRIPTS, index=SCRIPTS.index(CFG["plate_script"]),

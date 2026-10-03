@@ -112,6 +112,8 @@ class Store:
                 self.db.execute(f"ALTER TABLE plate_reads ADD COLUMN {col} {typ}")
         if "decoder" not in {r["name"] for r in self.db.execute("PRAGMA table_info(media)")}:
             self.db.execute("ALTER TABLE media ADD COLUMN decoder TEXT")
+        if "crop" not in {r["name"] for r in self.db.execute("PRAGMA table_info(plate_labels)")}:
+            self.db.execute("ALTER TABLE plate_labels ADD COLUMN crop BLOB")  # PNG of the taught plate
 
     # ---- media -------------------------------------------------------------
     def upsert_media(self, info, clock_start: str | None) -> int:
@@ -138,6 +140,7 @@ class Store:
         """Forget a video: its plates, people and frame pictures. Corrections typed in the Teach
         tab are kept (they still fix the same reading mistakes in other videos)."""
         row = self.media(media_id)
+        self.keep_label_crops(media_id)
         for table in ("plate_reads", "person_dets", "frame_sigs", "vehicle_dets", "alerts"):
             self.db.execute(f"DELETE FROM {table} WHERE media_id=?", (media_id,))
         self.db.execute("UPDATE plate_labels SET media_id=NULL WHERE media_id=?", (media_id,))
@@ -184,7 +187,7 @@ class Store:
 
     def frame(self, row) -> np.ndarray | None:
         """The video frame a detection was made in (exact, also for videos that seek badly)."""
-        media = self.media(row["media_id"])
+        media = self.media(row["media_id"]) if row["media_id"] is not None else None
         if not media:
             return None
         return read_frame(media["path"], row["frame"], self.frame_sig(row), hw=media["decoder"] == "gpu")
@@ -241,12 +244,31 @@ class Store:
     def reads_with_text(self, text: str):
         return self.db.execute("SELECT * FROM plate_reads WHERE text=? AND source IS NULL", (text,)).fetchall()
 
-    def add_label(self, row, ocr_text: str, label: str, sig):
+    def add_label(self, row, ocr_text: str, label: str, sig, crop: bytes | None = None):
         self.db.execute(
-            "INSERT INTO plate_labels(media_id, frame, x1, y1, x2, y2, ocr_text, label, sig) VALUES (?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO plate_labels(media_id, frame, x1, y1, x2, y2, ocr_text, label, sig, crop) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?)",
             (row["media_id"], row["frame"], row["x1"], row["y1"], row["x2"], row["y2"], ocr_text, label,
-             sig))
+             sig, crop))
         self.db.commit()
+
+    def keep_label_crops(self, media_id: int):
+        """Save the plate pictures of this video's taught plates in the index (before the video is
+        removed), so they can still be exported for training."""
+        import cv2
+
+        for lab in self.db.execute("SELECT * FROM plate_labels WHERE media_id=? AND crop IS NULL AND label != ''",
+                                   (media_id,)).fetchall():
+            try:
+                img = self.frame(lab)
+            except Exception:
+                img = None
+            if img is None:
+                continue
+            c = img[max(0, lab["y1"]):lab["y2"], max(0, lab["x1"]):lab["x2"]]
+            ok, png = cv2.imencode(".png", c) if c.size else (False, None)
+            if ok:
+                self.db.execute("UPDATE plate_labels SET crop=? WHERE id=?", (png.tobytes(), lab["id"]))
 
     def labels(self):
         return self.db.execute("SELECT * FROM plate_labels ORDER BY id").fetchall()

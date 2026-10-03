@@ -1,7 +1,14 @@
-"""Indexing pipeline shared by the CLI and the web UI."""
+"""Indexing pipeline shared by the CLI and the web UI.
+
+The video is decoded once. Each sampled frame goes to the plate reader and the people finder,
+which run side by side in their own threads (the graphics card and the processor work on both
+at the same time), while this thread saves what they find.
+"""
 from __future__ import annotations
 
 import os
+import queue
+import threading
 import time
 from typing import Callable
 
@@ -16,67 +23,246 @@ _INDEXERS: dict = {}
 # progress(kind, frame_index, total_frames, found, video_seconds)
 Progress = Callable[[str, int, int, int, float], None]
 
+_END = object()
 
-def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float,
-               motion_skip: bool = True, progress: Progress | None = None) -> int:
-    m = store.media(media_id)
-    if m[f"{kind}_done"]:
-        return -1
-    start = m[f"{kind}_next_frame"]
-    total = info.frames if info.kind == "video" else 1
-    add = store.add_plate_reads if kind == "plates" else store.add_person_dets
-    found, last_commit = 0, time.time()
-    pending: list[dict] = []
-    next_frame = start
+
+class _Worker(threading.Thread):
+    """Runs one indexer on its frames, in order, and hands the results back."""
+
+    def __init__(self, kind: str, indexer, start_frame: int, video: bool, out: queue.Queue,
+                 stop: threading.Event):
+        super().__init__(daemon=True, name=f"index-{kind}")
+        self.kind, self.indexer, self.start_frame, self.video = kind, indexer, start_frame, video
+        self.inbox: queue.Queue = queue.Queue(maxsize=8)
+        self.out, self.stop = out, stop
+        self.busy = 0.0
+
+    def put(self, frame) -> bool:
+        while not self.stop.is_set():
+            try:
+                self.inbox.put(frame, timeout=0.2)
+                return True
+            except queue.Full:
+                pass
+        return False
+
+    def run(self):
+        try:
+            while not self.stop.is_set():
+                try:
+                    frame = self.inbox.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if frame is _END:
+                    break
+                if frame.index < self.start_frame:
+                    continue
+                t0 = time.perf_counter()
+                rows = self.indexer.process(frame)
+                vehicles = self.indexer.drain_vehicles() if hasattr(self.indexer, "drain_vehicles") else []
+                sig = frame_signature(frame.image) if (rows or vehicles) and self.video else None
+                self.busy += time.perf_counter() - t0
+                self.out.put((self.kind, frame.index, frame.t, rows, vehicles, sig))
+        except BaseException as e:  # handed to the saving thread, which stops the run
+            self.out.put((self.kind, e))
+            return
+        self.out.put((self.kind, _END))
+
+
+class Detector:
+    """One detector run per frame for both people and vehicles (they are the same model), instead
+    of one run for the plate reader and another for the people finder."""
+
+    def __init__(self, model="yolo11n.pt"):
+        from ultralytics import YOLO
+
+        self.yolo = YOLO(model)
+
+    def __call__(self, img) -> dict:
+        from .gpu import half
+
+        res = self.yolo.predict(img, classes=[0, *L.VEHICLE_CLASSES], conf=0.3, verbose=False, **half())[0]
+        boxes = res.boxes.cpu().numpy()
+        cls, conf = boxes.cls.astype(int), boxes.conf
+        vehicles = [(L.VEHICLE_CLASSES[c], [int(v) for v in b])
+                    for b, c in zip(boxes.xyxy, cls) if c in L.VEHICLE_CLASSES]
+        return {"persons": boxes[(cls == 0) & (conf >= 0.35)], "vehicles": vehicles}
+
+
+def _feed(path, rates, start, motion_skip, hw, workers, stop, stats, out):
+    """Decode the video once and give each frame to the workers it is sampled for."""
     try:
-        from .settings import load
+        t0 = time.perf_counter()
+        for frame in iter_frames(path, rates, start_frame=start, motion_skip=motion_skip, prefetch=0, hw=hw):
+            stats["decode"] += time.perf_counter() - t0
+            if not workers["detect"].put(frame):
+                return
+            t0 = time.perf_counter()
+    except BaseException as e:
+        out.put(("decode", e))
+    finally:
+        workers["detect"].put(_END)
 
-        hw = store.decoder(media_id, "gpu" if load()["gpu_decode"] else "cpu") == "gpu"
-        for frame in iter_frames(info.path, fps, start_frame=start, motion_skip=motion_skip, hw=hw):
-            rows = indexer.process(frame)
-            vehicles = indexer.drain_vehicles() if hasattr(indexer, "drain_vehicles") else []
+
+class _Detect(threading.Thread):
+    """Runs the shared detector on each frame (in order) and passes the frame on."""
+
+    def __init__(self, detector, workers: dict, out: queue.Queue, stop: threading.Event):
+        super().__init__(daemon=True, name="index-detect")
+        self.detector, self.workers, self.out, self.stop = detector, workers, out, stop
+        self.inbox: queue.Queue = queue.Queue(maxsize=8)
+        self.busy = 0.0
+
+    put = _Worker.put
+
+    def run(self):
+        try:
+            while not self.stop.is_set():
+                try:
+                    frame = self.inbox.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                if frame is _END:
+                    break
+                if self.detector is not None:
+                    t0 = time.perf_counter()
+                    frame.dets = self.detector(frame.image)
+                    self.busy += time.perf_counter() - t0
+                for kind in frame.kinds:
+                    if not self.workers[kind].put(frame):
+                        return
+        except BaseException as e:
+            self.out.put(("detect", e))
+        finally:
+            for w in self.workers.values():
+                w.put(_END)
+
+
+def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
+                 motion_skip: bool = True, progress: Progress | None = None, detector=None) -> dict:
+    """Index the kinds in `indexers` ({"plates": PlateIndexer, "persons": PersonIndexer}) in one
+    decode of the video. Resumes each kind where it stopped. Returns {kind: detections found
+    (-1 if it was already done)} and "timing" (seconds per step)."""
+    m = store.media(media_id)
+    result = {k: -1 for k in indexers if m[f"{k}_done"]}
+    todo = {k: ix for k, ix in indexers.items() if k not in result}
+    if not todo:
+        return result
+    total = info.frames if info.kind == "video" else 1
+    nxt = {k: m[f"{k}_next_frame"] for k in todo}
+    add = {"plates": store.add_plate_reads, "persons": store.add_person_dets}
+    found = {k: 0 for k in todo}
+    pending: dict[str, list] = {k: [] for k in todo}
+    from .settings import load
+
+    hw = store.decoder(media_id, "gpu" if load()["gpu_decode"] else "cpu") == "gpu"
+    out: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    workers = {k: _Worker(k, ix, nxt[k], info.kind == "video", out, stop) for k, ix in todo.items()}
+    # both kinds: detect people and vehicles in one run per frame
+    detect = _Detect(detector if len(todo) > 1 else None, workers, out, stop)
+    stats = {"decode": 0.0, "saving": 0.0}
+    feeder = threading.Thread(target=_feed, daemon=True, name="index-decode",
+                              args=(info.path, {k: rates[k] for k in todo}, min(nxt.values()), motion_skip,
+                                    hw, {"detect": detect}, stop, stats, out))
+
+    def save():
+        t0 = time.perf_counter()
+        for k in todo:
+            add[k](media_id, pending[k])
+            pending[k] = []
+            store.set_progress(media_id, k, nxt[k])  # commits; safe to stop and resume
+        stats["saving"] += time.perf_counter() - t0
+
+    started, last_commit, running = time.perf_counter(), time.time(), set(todo)
+    for w in (*workers.values(), detect):
+        w.start()
+    feeder.start()
+    try:
+        while running:
+            try:
+                item = out.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            if isinstance(item[1], BaseException):
+                raise item[1]
+            if item[1] is _END:
+                running.discard(item[0])
+                continue
+            kind, index, t, rows, vehicles, sig = item
             if vehicles:
                 store.add_vehicle_dets(media_id, vehicles)
-            if (rows or vehicles) and info.kind == "video":
-                store.add_frame_sig(media_id, frame.index, frame_signature(frame.image))
-            pending += rows
-            found += len(rows)
-            next_frame = frame.index + 1
+            if sig is not None:
+                store.add_frame_sig(media_id, index, sig)
+            pending[kind] += rows
+            found[kind] += len(rows)
+            nxt[kind] = index + 1
             if time.time() - last_commit > 10:
                 if store.media(media_id) is None:  # removed from the index while being indexed
                     store.db.rollback()
-                    return found
-                add(media_id, pending)
-                pending = []
-                store.set_progress(media_id, kind, next_frame)  # commits; safe to stop and resume
+                    return {**result, **found}
+                save()
                 last_commit = time.time()
             if progress:
-                progress(kind, frame.index + 1, total, found, frame.t)
+                progress(kind, index + 1, total, found[kind], t)
     except BaseException:
         # Stopped (Stop button, Ctrl+C) or failed: keep everything found so far and release the
         # database, so the next run can search it and continue from here.
+        stop.set()
         try:
-            add(media_id, pending)
-            store.set_progress(media_id, kind, next_frame)
+            save()
         except Exception:
             store.db.rollback()
         raise
-    add(media_id, pending)
-    store.set_progress(media_id, kind, total, done=True)
-    if progress:
-        progress(kind, total, total, found, info.duration)
-    return found
+    finally:
+        stop.set()
+        for th in (feeder, detect, *workers.values()):  # models must be free before the next video
+            th.join()
+    for k in todo:
+        add[k](media_id, pending[k])
+        store.set_progress(media_id, k, total, done=True)
+        if progress:
+            progress(k, total, total, found[k], info.duration)
+    timing = {"decoding video": stats["decode"], "saving": stats["saving"]}
+    if detect.busy:
+        timing["people + vehicle detector"] = detect.busy
+    for ix in todo.values():
+        timing.update(getattr(ix, "timing", {}))
+    timing["total"] = time.perf_counter() - started
+    return {**result, **found, "timing": timing}
+
+
+def timing_lines(timing: dict, video_seconds: float) -> list[str]:
+    """Speed of a finished run and where its time went, for the screen."""
+    total = timing.get("total") or 0.0
+    if total <= 0:
+        return []
+    lines = [f"Indexed {video_seconds / 60:.1f} min of video in {total / 60:.1f} min: "
+             f"{video_seconds / total:.1f}x real time (10 h of video in about {10 * total / max(video_seconds, 1e-6):.1f} h)."]
+    steps = sorted(((k, v) for k, v in timing.items() if k != "total" and v >= 0.05), key=lambda kv: -kv[1])
+    if steps:
+        lines.append("Time per step (steps run side by side, so they add up to more than the total): "
+                     + ", ".join(f"{k} {v:.0f} s" for k, v in steps))
+    return lines
+
+
+def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float,
+               motion_skip: bool = True, progress: Progress | None = None) -> int:
+    """One kind on its own (kept for callers that index plates or people separately)."""
+    return index_passes(store, media_id, info, {kind: indexer}, {kind: fps}, motion_skip, progress)[kind]
 
 
 def index_media(store: Store, path: str, plates: bool = True, persons: bool = True,
                 plate_fps: float = 4.0, person_fps: float = 3.0, clock_start: str | None = None,
                 min_ocr_conf: float = 0.5, vehicle_crops: bool = False, plate_script: str = "auto", car_models: bool = True, motion_skip: bool = True,
-                reindex: bool = False, progress: Progress | None = None, skip_empty_road: bool = False) -> dict:
+                reindex: bool = False, progress: Progress | None = None, skip_empty_road: bool = False,
+                model_looks: int = 4) -> dict:
     # DVR exports that cannot jump to an exact frame are copied into a fixed .mp4 first
     path = fix_seeking(path, os.path.join(os.path.dirname(os.path.abspath(store.path)), "fixed_videos"))
     info = probe(path)
     mid = store.upsert_media(info, clock_start)
     result = {"media_id": mid, "info": info}
+    indexers, rates = {}, {}
     if plates:
         if reindex:
             store.reset(mid, "plates")
@@ -92,7 +278,8 @@ def index_media(store: Store, path: str, plates: bool = True, persons: bool = Tr
                                             script=plate_script, car_models=car_models)
         idx = _INDEXERS[key]
         idx.start(memory=Memory(store), track_offset=store.max_vehicle_track(mid) + 1, skip_empty=skip_empty_road)
-        result["plates"] = index_pass(store, mid, info, "plates", idx, plate_fps, motion_skip, progress)
+        idx.max_model_looks = model_looks
+        indexers["plates"], rates["plates"] = idx, plate_fps
     if persons:
         if reindex:
             store.reset(mid, "persons")
@@ -100,7 +287,14 @@ def index_media(store: Store, path: str, plates: bool = True, persons: bool = Tr
             _INDEXERS["persons"] = P.PersonIndexer()
         idx = _INDEXERS["persons"]
         idx.start(track_offset=store.max_track_id(mid) + 1)
-        result["persons"] = index_pass(store, mid, info, "persons", idx, person_fps, motion_skip, progress)
+        indexers["persons"], rates["persons"] = idx, person_fps
+    detector = None
+    if len(indexers) > 1:
+        if "detector" not in _INDEXERS:
+            _INDEXERS["detector"] = Detector()
+        detector = _INDEXERS["detector"]
+    if indexers:
+        result.update(index_passes(store, mid, info, indexers, rates, motion_skip, progress, detector))
     from .watch import check
 
     result["alerts"] = check(store, mid)  # wanted plates / faces found in this video

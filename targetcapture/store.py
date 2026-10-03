@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS media (
     plates_next_frame INTEGER DEFAULT 0,   -- resume point for plate indexing
     persons_next_frame INTEGER DEFAULT 0,  -- resume point for person indexing
     plates_done INTEGER DEFAULT 0,
-    persons_done INTEGER DEFAULT 0
+    persons_done INTEGER DEFAULT 0,
+    decoder TEXT                      -- 'gpu' or 'cpu': pictures are fetched with the decoder used to index
 );
 CREATE TABLE IF NOT EXISTS plate_reads (
     id INTEGER PRIMARY KEY,
@@ -109,6 +110,8 @@ class Store:
                          ("sharp", "REAL")):  # older indexes
             if col not in cols:
                 self.db.execute(f"ALTER TABLE plate_reads ADD COLUMN {col} {typ}")
+        if "decoder" not in {r["name"] for r in self.db.execute("PRAGMA table_info(media)")}:
+            self.db.execute("ALTER TABLE media ADD COLUMN decoder TEXT")
 
     # ---- media -------------------------------------------------------------
     def upsert_media(self, info, clock_start: str | None) -> int:
@@ -182,7 +185,21 @@ class Store:
     def frame(self, row) -> np.ndarray | None:
         """The video frame a detection was made in (exact, also for videos that seek badly)."""
         media = self.media(row["media_id"])
-        return read_frame(media["path"], row["frame"], self.frame_sig(row)) if media else None
+        if not media:
+            return None
+        return read_frame(media["path"], row["frame"], self.frame_sig(row), hw=media["decoder"] == "gpu")
+
+    def decoder(self, media_id: int, wanted: str) -> str:
+        """The decoder a video is indexed with: the one already used for it (a resumed or
+        repeated run must match the saved frame fingerprints), else `wanted`."""
+        row = self.media(media_id)
+        used = row["decoder"] if row else None
+        has_data = row and (row["plates_next_frame"] or row["persons_next_frame"])
+        if used and has_data:
+            return used
+        self.db.execute("UPDATE media SET decoder=? WHERE id=?", (wanted, media_id))
+        self.db.commit()
+        return wanted
 
     # ---- plates ------------------------------------------------------------
     def add_plate_reads(self, media_id: int, rows: list[dict]):

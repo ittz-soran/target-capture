@@ -725,6 +725,9 @@ with tab_settings:
                                                     "accurate": "Accurate, slower (1.7 GB download)"}.get)
         n["vehicle_crops"] = c2.checkbox("Read plates inside each vehicle (slower)", CFG["vehicle_crops"])
         n["skip_empty_road"] = c2.checkbox("Skip plate reading when no vehicle is in view", CFG["skip_empty_road"])
+        n["gpu_decode"] = c2.checkbox("Decode video on the graphics card", CFG["gpu_decode"],
+                                      help="Less work for the processor on long 1080p/4K videos. Falls back "
+                                           "to normal decoding by itself when the card or driver cannot.")
         st.markdown("**Searching and watch list**")
         c1, c2, c3, c4 = st.columns(4)
         n["plate_max_dist"] = c1.number_input("Plate search: allowed differences", 0, 3, int(CFG["plate_max_dist"]))

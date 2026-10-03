@@ -24,6 +24,7 @@ DEFAULTS = {
     "vehicle_crops": False,
     "skip_empty_road": False,
     "min_ocr_conf": 0.5,
+    "gpu_decode": True,       # decode video on the graphics card when possible (falls back by itself)
     # Searching
     "plate_max_dist": 1,
     "face_threshold": 0.45,   # watch list: how alike a face must be (higher = stricter)

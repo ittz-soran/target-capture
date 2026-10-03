@@ -244,7 +244,9 @@ Recent speed-ups (same results, less work):
 * Faces are read only when useful: the first 3 per person, then every 0.6 s or when the person gets clearly bigger. On a busy town clip this halved person indexing time (478 s to 238 s) with identical search results.
 * The car model is worked out once per car (and again only if the car gets much bigger), not on every frame.
 * On an NVIDIA GPU the detectors run in half precision.
-* The video is read in the background while the detectors work.
+* The video is read in the background while the detectors work, and decoded on the graphics card when possible
+  (Settings tab; falls back to normal decoding by itself). Pictures of results are fetched with the same decoder the
+  video was indexed with, so they match exactly.
 * Long videos need no splitting: indexing saves its place every 10 seconds and can be stopped and continued.
 
 Plate pictures: the capture shown for each car is the clearest one (reader confidence, plate size and sharpness, so

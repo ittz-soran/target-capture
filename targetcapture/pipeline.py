@@ -29,7 +29,10 @@ def index_pass(store: Store, media_id: int, info, kind: str, indexer, fps: float
     pending: list[dict] = []
     next_frame = start
     try:
-        for frame in iter_frames(info.path, fps, start_frame=start, motion_skip=motion_skip):
+        from .settings import load
+
+        hw = store.decoder(media_id, "gpu" if load()["gpu_decode"] else "cpu") == "gpu"
+        for frame in iter_frames(info.path, fps, start_frame=start, motion_skip=motion_skip, hw=hw):
             rows = indexer.process(frame)
             vehicles = indexer.drain_vehicles() if hasattr(indexer, "drain_vehicles") else []
             if vehicles:

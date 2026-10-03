@@ -85,9 +85,11 @@ def open_video(path: str, hw: bool = True) -> cv2.VideoCapture:
     (NVIDIA, Intel or AMD; much less CPU on long 1080p/4K H.264/H.265 files). Falls back to
     normal decoding by itself."""
     if hw and hasattr(cv2, "VIDEO_ACCELERATION_ANY"):
+        params = [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY]
+        if hasattr(cv2, "CAP_PROP_ORIENTATION_AUTO"):  # turn phone videos upright, like normal decoding
+            params += [cv2.CAP_PROP_ORIENTATION_AUTO, 1]
         try:
-            cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG,
-                                   [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
+            cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG, params)
             if cap.isOpened():
                 return cap
             cap.release()
@@ -210,7 +212,8 @@ def _sig_diff(img: np.ndarray, sig: np.ndarray) -> float:
     return float(np.abs(frame_signature(img).astype(np.int16) - sig.astype(np.int16)).mean())
 
 
-def read_frame(path: str, index: int, sig: np.ndarray | None = None, window: float = 4.0) -> np.ndarray | None:
+def read_frame(path: str, index: int, sig: np.ndarray | None = None, window: float = 4.0,
+               hw: bool = False) -> np.ndarray | None:
     """Fetch one frame by index (used when showing results, so the index stays small).
 
     Many DVR files cannot seek exactly: the frame OpenCV jumps to is not the frame that was
@@ -219,11 +222,11 @@ def read_frame(path: str, index: int, sig: np.ndarray | None = None, window: flo
     returned; None if it cannot be found."""
     if is_image(path):
         return cv2.imread(path)
-    img = _read_frame(cv2.VideoCapture(path), index, sig, window)
-    if img is None and sig is not None and hasattr(cv2, "VIDEO_ACCELERATION_ANY"):
-        # indexed with graphics-card decoding (an earlier version), whose pictures differ a
-        # little (colours, rotation of phone videos): look again with the same decoder
-        img = _read_frame(open_video(path, hw=True), index, sig, window)
+    # the decoder the video was indexed with (graphics-card pictures can differ a little in
+    # colour), then the other one (indexes from versions that did not record it)
+    img = _read_frame(open_video(path, hw), index, sig, window)
+    if img is None and sig is not None:
+        img = _read_frame(open_video(path, not hw), index, sig, window)
     if img is None and sig is not None:
         # still not found (e.g. the video file was replaced or re-encoded): take the closest
         # frame if it is clearly the same scene, rather than showing no picture at all

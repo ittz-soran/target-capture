@@ -244,6 +244,15 @@ Recent speed-ups (same results, less work):
 * Faces are read only when useful: the first 3 per person, then every 0.6 s or when the person gets clearly bigger. On a busy town clip this halved person indexing time (478 s to 238 s) with identical search results.
 * The car model is worked out once per car (and again only if the car gets much bigger), not on every frame.
 * On an NVIDIA GPU the detectors run in half precision.
+* The video is read in the background while the detectors work, and decoded on the graphics card when OpenCV and
+  the driver allow it (falls back to normal decoding by itself). This helps most on a GPU, where decoding long
+  1080p/4K files is the slow part; on CPU it saves little because the detectors are the slow part.
+* Long videos need no splitting: indexing saves its place every 10 seconds and can be stopped and continued.
+
+Plate pictures: the capture shown for each car is the clearest one (reader confidence, plate size and sharpness, so
+motion-blurred frames lose), and close-ups are enlarged with a high-quality filter, contrast-evened, lightly sharpened
+and de-interlaced when the DVR video is interlaced. This makes readable plates easier to read; it cannot recover
+characters the camera never captured.
 * Optional: `--skip-empty-road` (or the Advanced checkbox "Faster: skip plate reading when no vehicle is in view") skips plate reading on frames with no vehicle. It is much faster on quiet roads but can miss plates on cars the detector does not see, so it is off by default.
 
 ## Run the tests

@@ -7,6 +7,7 @@ import json
 import os
 
 import cv2
+import numpy as np
 
 from .store import clock_time, fmt_offset
 
@@ -18,7 +19,7 @@ def _save(img, path, max_w=None):
         return None
     if max_w and img.shape[1] > max_w:
         img = cv2.resize(img, None, fx=max_w / img.shape[1], fy=max_w / img.shape[1])
-    cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 92])
     return os.path.basename(path)
 
 
@@ -32,6 +33,35 @@ def _crop(img, x1, y1, x2, y2, pad=0.15, min_w=160):
     if c.size and c.shape[1] < min_w:
         c = cv2.resize(c, None, fx=min_w / c.shape[1], fy=min_w / c.shape[1], interpolation=cv2.INTER_CUBIC)
     return c
+
+
+def _combed(img) -> bool:
+    """Interlaced DVR video: the two half-pictures of a moving car are taken 1/50 s apart, so
+    its edges look like a comb. Neighbouring lines then differ much more than every other line."""
+    g = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).astype(np.float32) if img.ndim == 3 else img.astype(np.float32)
+    if g.shape[0] < 12:
+        return False
+    near = np.abs(g[1:-1] - (g[:-2] + g[2:]) / 2).mean()
+    far = np.abs(g[2:-2] - (g[:-4] + g[4:]) / 2).mean()
+    return near > 1.6 * far + 1.0
+
+
+def enhance_plate(crop, min_w=360):
+    """A clearer plate close-up for people to read: interlacing combs removed, enlarged with a
+    high-quality filter, contrast evened out and edges sharpened a little. (Only the picture
+    shown; reading uses the original.)"""
+    if crop is None or crop.size == 0:
+        return crop
+    if _combed(crop):  # keep one half-picture and stretch it back to full height
+        crop = cv2.resize(crop[::2], (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_LINEAR)
+    if crop.shape[1] < min_w:
+        f = min_w / crop.shape[1]
+        crop = cv2.resize(crop, None, fx=f, fy=f, interpolation=cv2.INTER_LANCZOS4)
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)
+    lab[..., 0] = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4)).apply(lab[..., 0])
+    crop = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+    blur = cv2.GaussianBlur(crop, (0, 0), 2.0)
+    return cv2.addWeighted(crop, 1.6, blur, -0.6, 0)
 
 
 def _times(media, start, end):
@@ -120,13 +150,13 @@ def _plate_snapshot(store, s, b, out_dir, stem):
     frame = store.frame(b)
     if frame is None:
         return None, None
-    crop = _save(_crop(frame, b["x1"], b["y1"], b["x2"], b["y2"], pad=0.1, min_w=240),
+    crop = _save(enhance_plate(_crop(frame, b["x1"], b["y1"], b["x2"], b["y2"], pad=0.15, min_w=0)),
                  os.path.join(out_dir, f"{stem}_plate.jpg"))
     if b["vx1"] is not None:
         cv2.rectangle(frame, (b["vx1"], b["vy1"]), (b["vx2"], b["vy2"]), GREEN, 2)
     cv2.rectangle(frame, (b["x1"], b["y1"]), (b["x2"], b["y2"]), RED, 2)
     cv2.putText(frame, s["text"], (b["x1"], max(20, b["y1"] - 8)), cv2.FONT_HERSHEY_SIMPLEX, 0.8, RED, 2)
-    return _save(frame, os.path.join(out_dir, f"{stem}_frame.jpg"), max_w=1280), crop
+    return _save(frame, os.path.join(out_dir, f"{stem}_frame.jpg"), max_w=1920), crop
 
 
 def person_report(store, query_paths, sightings, stats, threshold, out_dir):
@@ -191,7 +221,7 @@ def thumbnail(row, store, cache_dir, box=("x1", "y1", "x2", "y2"), pad=0.15, min
     """Crop (or whole frame with the box drawn, if full=True) for one stored detection,
     cached on disk so galleries do not re-decode video on every page load."""
     x1, y1, x2, y2 = (row[k] for k in box)
-    name = f"{row['media_id']}_{row['frame']}_{x1}_{y1}_{'f' if full else 'c'}2.jpg"
+    name = f"{row['media_id']}_{row['frame']}_{x1}_{y1}_{'f' if full else 'c'}3.jpg"
     path = os.path.join(cache_dir, name)
     if os.path.exists(path):
         return path
@@ -202,4 +232,7 @@ def thumbnail(row, store, cache_dir, box=("x1", "y1", "x2", "y2"), pad=0.15, min
     if full:
         cv2.rectangle(frame, (x1, y1), (x2, y2), RED, 3)
         return os.path.join(cache_dir, _save(frame, path, max_w=1280))
-    return os.path.join(cache_dir, _save(_crop(frame, x1, y1, x2, y2, pad=pad, min_w=min_w), path))
+    crop = _crop(frame, x1, y1, x2, y2, pad=pad, min_w=min_w)
+    if box == ("x1", "y1", "x2", "y2") and "text" in row.keys():  # a plate: make it easier to read
+        crop = enhance_plate(crop)
+    return os.path.join(cache_dir, _save(crop, path))

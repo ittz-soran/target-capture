@@ -80,6 +80,22 @@ def _motion_signature(img: np.ndarray) -> np.ndarray:
     return cv2.GaussianBlur(gray, (5, 5), 0).astype(np.int16)
 
 
+def open_video(path: str, hw: bool = True) -> cv2.VideoCapture:
+    """Open a video, decoding on the graphics card when OpenCV and the driver allow it
+    (NVIDIA, Intel or AMD; much less CPU on long 1080p/4K H.264/H.265 files). Falls back to
+    normal decoding by itself."""
+    if hw and hasattr(cv2, "VIDEO_ACCELERATION_ANY"):
+        try:
+            cap = cv2.VideoCapture(path, cv2.CAP_FFMPEG,
+                                   [cv2.CAP_PROP_HW_ACCELERATION, cv2.VIDEO_ACCELERATION_ANY])
+            if cap.isOpened():
+                return cap
+            cap.release()
+        except cv2.error:
+            pass
+    return cv2.VideoCapture(path)
+
+
 def iter_frames(
     path: str,
     sample_fps: float,
@@ -87,42 +103,96 @@ def iter_frames(
     motion_skip: bool = True,
     motion_threshold: float = 1.5,
     max_still: float = 5.0,
+    prefetch: int = 16,
+    hw: bool = True,
 ) -> Iterator[Frame]:
-    """Yield sampled frames. For an image, yields the image once."""
+    """Yield sampled frames. For an image, yields the image once. The video is decoded in a
+    background thread, so decoding the next frames overlaps with the detectors' work."""
     info = probe(path)
     if info.kind == "image":
         if start_frame == 0:
             yield Frame(0, 0.0, cv2.imread(path))
         return
+    frames = _sampled(path, info, sample_fps, start_frame, motion_skip, motion_threshold, max_still, hw)
+    yield from (_prefetched(frames, prefetch) if prefetch > 0 else frames)
 
+
+def _sampled(path, info, sample_fps, start_frame, motion_skip, motion_threshold, max_still, hw):
     step = max(1, round(info.fps / sample_fps))
-    cap = cv2.VideoCapture(path)
+    cap = open_video(path, hw)
     if start_frame:
         cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
     i = start_frame
     last_sig = None
     last_t = -1e9
-    while True:
-        if i % step:
-            if not cap.grab():  # grab() skips the colour conversion of read()
-                break
-            i += 1
-            continue
-        ok, img = cap.read()
-        if not ok:
-            break
-        t = i / info.fps
-        if motion_skip:
-            sig = _motion_signature(img)
-            still = last_sig is not None and float(np.abs(sig - last_sig).mean()) < motion_threshold
-            if still and t - last_t < max_still:
+    try:
+        while True:
+            if i % step:
+                if not cap.grab():  # grab() skips the colour conversion of read()
+                    break
                 i += 1
                 continue
-            last_sig = sig
-        last_t = t
-        yield Frame(i, t, img)
-        i += 1
-    cap.release()
+            ok, img = cap.read()
+            if not ok:
+                break
+            t = i / info.fps
+            if motion_skip:
+                sig = _motion_signature(img)
+                still = last_sig is not None and float(np.abs(sig - last_sig).mean()) < motion_threshold
+                if still and t - last_t < max_still:
+                    i += 1
+                    continue
+                last_sig = sig
+            last_t = t
+            yield Frame(i, t, img)
+            i += 1
+    finally:
+        cap.release()
+
+
+def _prefetched(frames: Iterator[Frame], size: int) -> Iterator[Frame]:
+    """Run a frame generator in a background thread, keeping up to `size` frames ready."""
+    import queue
+    import threading
+
+    q: queue.Queue = queue.Queue(maxsize=size)
+    stop = threading.Event()
+    end = object()
+
+    def work():
+        try:
+            for f in frames:
+                while not stop.is_set():
+                    try:
+                        q.put(f, timeout=0.5)
+                        break
+                    except queue.Full:
+                        pass
+                if stop.is_set():
+                    break
+        except Exception as e:  # handed to the reader below
+            q.put(e)
+        finally:
+            frames.close()
+            q.put(end)
+
+    th = threading.Thread(target=work, daemon=True, name="frame-reader")
+    th.start()
+    try:
+        while True:
+            f = q.get()
+            if f is end:
+                break
+            if isinstance(f, Exception):
+                raise f
+            yield f
+    finally:
+        stop.set()
+        while th.is_alive():  # let the reader finish so the file is closed
+            try:
+                q.get(timeout=0.1)
+            except queue.Empty:
+                pass
 
 
 SIG_W, SIG_H = 48, 27

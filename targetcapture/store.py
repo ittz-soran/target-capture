@@ -33,7 +33,8 @@ CREATE TABLE IF NOT EXISTS plate_reads (
     vehicle_model TEXT, model_conf REAL,   -- e.g. "Toyota Corolla", 0.62
     ocr_guess TEXT,                        -- for plates that could not be read (text = ''): OCR's best guess
     source TEXT,                           -- NULL = read by OCR, 'taught' = typed by the user, 'learned' = from a lesson
-    vx1 INTEGER, vy1 INTEGER, vx2 INTEGER, vy2 INTEGER
+    vx1 INTEGER, vy1 INTEGER, vx2 INTEGER, vy2 INTEGER,
+    sharp REAL                             -- picture sharpness (no motion blur), to pick the best capture
 );
 CREATE INDEX IF NOT EXISTS plate_reads_media_t ON plate_reads(media_id, t);
 CREATE TABLE IF NOT EXISTS plate_labels (   -- corrections typed in the Teach tab; survive re-indexing
@@ -104,7 +105,8 @@ class Store:
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
         cols = {r["name"] for r in self.db.execute("PRAGMA table_info(plate_reads)")}
-        for col, typ in (("vehicle_model", "TEXT"), ("model_conf", "REAL"), ("ocr_guess", "TEXT"), ("source", "TEXT")):  # older indexes
+        for col, typ in (("vehicle_model", "TEXT"), ("model_conf", "REAL"), ("ocr_guess", "TEXT"), ("source", "TEXT"),
+                         ("sharp", "REAL")):  # older indexes
             if col not in cols:
                 self.db.execute(f"ALTER TABLE plate_reads ADD COLUMN {col} {typ}")
 
@@ -186,10 +188,12 @@ class Store:
     def add_plate_reads(self, media_id: int, rows: list[dict]):
         self.db.executemany(
             """INSERT INTO plate_reads(media_id, frame, t, text, conf, region, x1, y1, x2, y2,
-               vehicle_type, vehicle_color, vehicle_model, model_conf, ocr_guess, source, vx1, vy1, vx2, vy2)
+               vehicle_type, vehicle_color, vehicle_model, model_conf, ocr_guess, source, vx1, vy1, vx2, vy2, sharp)
                VALUES (:media_id, :frame, :t, :text, :conf, :region, :x1, :y1, :x2, :y2,
-               :vehicle_type, :vehicle_color, :vehicle_model, :model_conf, :ocr_guess, :source, :vx1, :vy1, :vx2, :vy2)""",
-            [{"media_id": media_id, "vehicle_model": None, "model_conf": None, "ocr_guess": None, "source": None, **r}
+               :vehicle_type, :vehicle_color, :vehicle_model, :model_conf, :ocr_guess, :source, :vx1, :vy1, :vx2, :vy2,
+               :sharp)""",
+            [{"media_id": media_id, "vehicle_model": None, "model_conf": None, "ocr_guess": None, "source": None,
+              "sharp": None, **r}
              for r in rows],
         )
 

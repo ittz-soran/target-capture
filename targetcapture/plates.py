@@ -16,6 +16,7 @@ import logging
 import re
 from collections import Counter, defaultdict
 
+import cv2
 import numpy as np
 
 from .arabic import AR, normalize_chars, to_latin_key
@@ -292,7 +293,8 @@ class PlateIndexer:
                 self.memory.apply(r, img)
         for r in reads:
             r.update(frame=frame.index, t=frame.t, vehicle_type=None, vehicle_color=None,
-                     vx1=None, vy1=None, vx2=None, vy2=None)
+                     vx1=None, vy1=None, vx2=None, vy2=None,
+                     sharp=sharpness(img[max(0, r["y1"]):r["y2"], max(0, r["x1"]):r["x2"]]))
             cx, cy = (r["x1"] + r["x2"]) / 2, (r["y1"] + r["y2"]) / 2
             best = None
             for vtype, (x1, y1, x2, y2), _ in vehicles:
@@ -390,13 +392,27 @@ def strip_codes(text: str) -> tuple[str, str | None]:
     return text, None
 
 
+def sharpness(crop) -> float | None:
+    """How sharp a plate picture is (motion blur and focus): variance of the Laplacian of the
+    plate at a fixed size, so big and small plates compare fairly."""
+    if crop is None or crop.size == 0 or min(crop.shape[:2]) < 6:
+        return None
+    g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    g = cv2.resize(g, (160, max(8, round(160 * g.shape[0] / g.shape[1]))), interpolation=cv2.INTER_AREA)
+    return float(cv2.Laplacian(g, cv2.CV_64F).var())
+
+
 def _quality(r) -> float:
-    """How good a capture is: reader confidence, and bigger plates (closer to the camera)
-    are clearer. Used to pick the picture shown for a car."""
+    """How good a capture is: reader confidence, bigger plates (closer to the camera) and
+    sharper pictures (no motion blur) are better. Used to pick the picture shown for a car."""
     if r.get("x1") is None:
         return float(r["conf"] or 0)
     w = max(1, r["x2"] - r["x1"])
-    return float(r["conf"] or 0) * min(1.0, w / 140) ** 0.5
+    q = float(r["conf"] or 0) * min(1.0, w / 140) ** 0.5
+    sharp = r["sharp"] if "sharp" in r.keys() else None  # dict or database row
+    if sharp is not None:
+        q *= min(1.0, sharp / 400) ** 0.3
+    return q
 
 
 def _near(a, b, secs: float = 1.5) -> bool:

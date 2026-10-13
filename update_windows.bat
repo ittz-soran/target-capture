@@ -5,6 +5,11 @@ REM Settings tab: runs a copy of this file with "restart <app folder>" (the upda
 REM waits for the web page to close, and starts it again at the end.
 if "%~2"=="" (cd /d "%~dp0") else (cd /d "%~2")
 if "%~1"=="restart" timeout /t 5 /nobreak >nul
+REM Stop this app and live monitoring first (it runs hidden): Windows cannot replace files they use
+echo Stopping Target Capture and live monitoring...
+type nul > live.stop
+powershell -NoProfile -Command "Start-Sleep 3; Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python|^streamlit' -and $_.CommandLine -match 'targetcapture|streamlit' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+timeout /t 2 /nobreak >nul
 set REPO=https://github.com/ittz-soran/target-capture.git
 where git >nul 2>nul || (echo Git is not installed. Get it from https://git-scm.com/download/win & pause & exit /b 1)
 if not exist .git (

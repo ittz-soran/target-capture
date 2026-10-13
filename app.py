@@ -1047,6 +1047,9 @@ with tab_settings:
                                                     "accurate": "Accurate, slower (1.7 GB download)"}.get)
         n["vehicle_crops"] = c2.checkbox("Read plates inside each vehicle (slower)", CFG["vehicle_crops"])
         n["skip_empty_road"] = c2.checkbox("Skip plate reading when no vehicle is in view", CFG["skip_empty_road"])
+        n["keep_frames"] = c1.checkbox("Keep pictures of plates and faces while indexing", CFG["keep_frames"],
+                                       help="Results then show at once and on the exact frame. Uses disk "
+                                            "space (about 100-300 KB per picture); see Storage below.")
         n["gpu_decode"] = c2.checkbox("Decode video on the graphics card", CFG["gpu_decode"],
                                       help="Less work for the processor on long 1080p/4K videos. Falls back "
                                            "to normal decoding by itself when the card or driver cannot.")
@@ -1094,6 +1097,7 @@ with tab_settings:
     st.subheader("Storage")
     db_dir = os.path.dirname(os.path.abspath(db_path))
     places = {"Index database": db_path, "Uploaded videos": UPLOADS, "Repaired DVR videos": os.path.join(db_dir, "fixed_videos"),
+              "Kept plate and face pictures": os.path.join(db_dir, "kept_frames"),
               "Live recordings": "recordings", "Live camera pictures": os.path.join(db_dir, "live_frames"),
               "Results and pictures": RESULTS}
     sizes = {k: folder_size(p) for k, p in places.items() if os.path.exists(p)}

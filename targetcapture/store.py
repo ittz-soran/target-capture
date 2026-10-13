@@ -153,6 +153,9 @@ class Store:
         self.db.commit()
         self.purge_orphans()
         self.db.execute("VACUUM")  # give the disk space back
+        import shutil
+
+        shutil.rmtree(self.kept_dir(media_id), ignore_errors=True)
         return row["path"] if row else None
 
     def purge_orphans(self) -> int:
@@ -190,11 +193,20 @@ class Store:
                             (row["media_id"], row["frame"])).fetchone()
         return None if r is None else np.frombuffer(r["sig"], np.uint8).reshape(SIG_H, SIG_W)
 
+    def kept_dir(self, media_id: int) -> str:
+        """Pictures of the frames with plates / faces, kept while indexing (no video to search later)."""
+        return os.path.join(os.path.dirname(os.path.abspath(self.path)), "kept_frames", str(media_id))
+
     def frame(self, row) -> np.ndarray | None:
         """The video frame a detection was made in (exact, also for videos that seek badly)."""
         media = self.media(row["media_id"]) if row["media_id"] is not None else None
         if not media:
             return None
+        kept = os.path.join(self.kept_dir(media["id"]), f"{row['frame']:08d}.jpg")
+        if os.path.exists(kept):
+            img = cv2.imdecode(np.fromfile(kept, np.uint8), cv2.IMREAD_COLOR)
+            if img is not None:
+                return img
         if os.path.isdir(media["path"]):  # a live camera day: the pictures were kept as they came
             f = os.path.join(media["path"], f"{row['frame']:08d}.jpg")
             try:

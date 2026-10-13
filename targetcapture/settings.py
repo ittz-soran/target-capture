@@ -25,6 +25,7 @@ DEFAULTS = {
     "vehicle_crops": False,
     "skip_empty_road": False,
     "min_ocr_conf": 0.5,
+    "keep_frames": True,      # keep pictures of frames with plates / faces while indexing
     "gpu_decode": True,       # decode video on the graphics card when possible (falls back by itself)
     # Searching
     "plate_max_dist": 1,

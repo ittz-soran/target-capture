@@ -12,6 +12,8 @@ import threading
 import time
 from typing import Callable
 
+import cv2
+
 from . import persons as P
 from . import plates as L
 from .store import Store
@@ -37,9 +39,9 @@ class _Worker(threading.Thread):
     """Runs one indexer on its frames, in order, and hands the results back."""
 
     def __init__(self, kind: str, indexer, start_frame: int, video: bool, out: queue.Queue,
-                 stop: threading.Event):
+                 stop: threading.Event, keep: bool = True):
         super().__init__(daemon=True, name=f"index-{kind}")
-        self.kind, self.indexer, self.start_frame, self.video = kind, indexer, start_frame, video
+        self.kind, self.indexer, self.start_frame, self.video, self.keep = kind, indexer, start_frame, video, keep
         self.inbox: queue.Queue = queue.Queue(maxsize=8)
         self.out, self.stop = out, stop
         self.busy = 0.0
@@ -68,8 +70,13 @@ class _Worker(threading.Thread):
                 rows = self.indexer.process(frame)
                 vehicles = self.indexer.drain_vehicles() if hasattr(self.indexer, "drain_vehicles") else []
                 sig = frame_signature(frame.image) if (rows or vehicles) and self.video else None
+                # keep a picture of frames with a plate or a face picture: results then show at
+                # once and exactly, without finding the frame in the video again
+                keep = self.keep and self.video and any(
+                    self.kind == "plates" or r.get("face_jpg") for r in rows)
+                jpg = cv2.imencode(".jpg", frame.image, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes() if keep else None
                 self.busy += time.perf_counter() - t0
-                self.out.put((self.kind, frame.index, frame.t, rows, vehicles, sig))
+                self.out.put((self.kind, frame.index, frame.t, rows, vehicles, sig, jpg))
         except BaseException as e:  # handed to the saving thread, which stops the run
             self.out.put((self.kind, e))
             return
@@ -165,7 +172,9 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
     hw = store.decoder(media_id, "gpu" if load()["gpu_decode"] else "cpu") == "gpu"
     out: queue.Queue = queue.Queue()
     stop = threading.Event()
-    workers = {k: _Worker(k, ix, nxt[k], info.kind == "video", out, stop) for k, ix in todo.items()}
+    keep = load()["keep_frames"]
+    kept_dir = store.kept_dir(media_id)
+    workers = {k: _Worker(k, ix, nxt[k], info.kind == "video", out, stop, keep) for k, ix in todo.items()}
     # both kinds: detect people and vehicles in one run per frame
     detect = _Detect(detector if len(todo) > 1 else None, workers, out, stop)
     stats = {"decode": 0.0, "saving": 0.0}
@@ -208,7 +217,15 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
             if item[1] is _END:
                 running.discard(item[0])
                 continue
-            kind, index, t, rows, vehicles, sig = item
+            kind, index, t, rows, vehicles, sig, jpg = item
+            if jpg is not None:
+                t0 = time.perf_counter()
+                os.makedirs(kept_dir, exist_ok=True)
+                f = os.path.join(kept_dir, f"{index:08d}.jpg")
+                if not os.path.exists(f):
+                    with open(f, "wb") as fh:
+                        fh.write(jpg)
+                stats["saving"] += time.perf_counter() - t0
             if vehicles:
                 store.add_vehicle_dets(media_id, vehicles)
             if sig is not None:

@@ -34,6 +34,7 @@ DEFAULTS = {
     # Live cameras
     "keep_days": 7.0,
     "segment_seconds": 60,
+    "live_autostart": False,  # start live monitoring by itself when the web page starts
     "live_record": False,     # also record live cameras in pieces (analysis does not need it)
     # Web page
     "db_path": "targetcapture.db",

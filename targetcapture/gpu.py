@@ -99,5 +99,5 @@ def describe() -> str:
     if name and onnx_on_gpu():
         return f"GPU: {name} ({gpu_memory_gb():.0f} GB)"
     if name:
-        return f"GPU for detection: {name} (plate reader and faces on CPU, run setup_gpu_windows.bat)"
-    return "CPU only (for an NVIDIA GPU run setup_gpu_windows.bat)"
+        return f"GPU for detection: {name} (plate reader and faces on CPU: Settings, Install graphics-card support)"
+    return "CPU only (for an NVIDIA GPU: Settings, Install graphics-card support)"

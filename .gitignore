@@ -16,3 +16,4 @@ runs/
 *.db-wal
 *.db-shm
 settings.json
+live.log

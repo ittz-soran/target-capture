@@ -482,31 +482,58 @@ with tab_watch:
             store.remove_watch(w["id"])
             st.rerun()
 
+STOP_FILE = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live.stop")
+
+
+def live_running(st_store) -> bool:
+    """A camera reported in the last 90 s (the live process writes every few seconds)."""
+    now = dt.datetime.now()
+    return any(c["last_seen"] and (now - dt.datetime.fromisoformat(c["last_seen"])).total_seconds() < 90
+               for c in st_store.cameras())
+
+
+def start_live():
+    """Start live monitoring as a hidden background process (it keeps running when the page closes)."""
+    if os.path.exists(STOP_FILE):
+        os.remove(STOP_FILE)
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    subprocess.Popen([sys.executable, "-m", "targetcapture", "--db", db_path, "live", "--stop-file", STOP_FILE],
+                     creationflags=flags, cwd=APP_DIR, stdout=open(os.path.join(APP_DIR, "live.log"), "a"),
+                     stderr=subprocess.STDOUT)
+
+
+@st.cache_resource
+def _autostart_once():
+    """Settings: start live monitoring when the page starts (once per page start, not per browser tab)."""
+    return {"done": False}
+
+
+_auto = _autostart_once()
+if not _auto["done"]:
+    _auto["done"] = True
+    if CFG["live_autostart"] and store.cameras() and not live_running(store):
+        start_live()
+        st.toast("Live monitoring started (Settings: start when the page opens).")
+
+
 with tab_cams:
     st.caption("Connect DVR / NVR / IP cameras. Each camera is analysed live, as the picture arrives: plates, "
                "people, vehicles and watch-list alerts show up a second or two after they happen, and everything "
                "found is searchable in the other tabs. The pictures of each moment with a detection are kept "
                f"{CFG['keep_days']:g} days (days with a watch-list match are kept); change this in Settings.")
-    stop_file = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live.stop")
     cams = store.cameras()
-    now = dt.datetime.now()
-    running = any(c["last_seen"] and (now - dt.datetime.fromisoformat(c["last_seen"])).total_seconds() < 90
-                  for c in cams)
+    running = live_running(store)
     b1, b2 = st.columns([1, 3])
     if running:
         b2.success("Live monitoring is running.")
         if b1.button("Stop live monitoring"):
-            open(stop_file, "w").close()
+            open(STOP_FILE, "w").close()
             st.info("Stopping…")
     else:
-        b2.info("Live monitoring is stopped. Start it here, or double-click run_live_windows.bat.")
+        b2.info("Live monitoring is stopped. Start it here. To start it by itself whenever this page opens, "
+                "tick 'Start live monitoring when the page opens' in Settings.")
         if b1.button("Start live monitoring", type="primary", disabled=not cams):
-            if os.path.exists(stop_file):
-                os.remove(stop_file)
-            flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-            subprocess.Popen([sys.executable, "-m", "targetcapture", "--db", db_path, "live",
-                              "--stop-file", stop_file], creationflags=flags,
-                             stdout=open("live.log", "a"), stderr=subprocess.STDOUT)
+            start_live()
             st.success("Starting… the cameras show 'recording' within a minute.")
     for c in cams:
         row = st.columns([2, 4, 1, 1])
@@ -873,6 +900,41 @@ def start_update():
     threading.Timer(2.0, os._exit, [0]).start()
 
 
+STARTUP_FILE = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows", "Start Menu", "Programs",
+                            "Startup", "Target Capture.cmd")
+
+
+def set_windows_startup(on: bool):
+    """Start the web page (minimized) when Windows starts, with a small file in the Startup folder."""
+    if on:
+        with open(STARTUP_FILE, "w", newline="\r\n") as f:
+            f.write(f'@echo off\ncd /d "{APP_DIR}"\nstart "Target Capture" /min run_windows.bat\n')
+    elif os.path.exists(STARTUP_FILE):
+        os.remove(STARTUP_FILE)
+
+
+def run_and_restart(bat: str):
+    """Run one of the .bat files in its own window from a temp copy with "restart <app folder>": it
+    stops this page, does its work and starts the page again."""
+    copy = os.path.join(tempfile.gettempdir(), f"target_capture_{bat}")
+    shutil.copyfile(os.path.join(APP_DIR, bat), copy)
+    subprocess.Popen([copy, "restart", APP_DIR], cwd=APP_DIR, creationflags=subprocess.CREATE_NEW_CONSOLE)
+    import threading
+
+    threading.Timer(2.0, os._exit, [0]).start()
+
+
+def restart_page():
+    """Close this web page and start it again (applies the largest-upload setting)."""
+    copy = os.path.join(tempfile.gettempdir(), "target_capture_restart.cmd")
+    with open(copy, "w", newline="\r\n") as f:
+        f.write(f'@echo off\ntimeout /t 3 /nobreak >nul\ncd /d "{APP_DIR}"\nstart "Target Capture" run_windows.bat\n')
+    subprocess.Popen(["cmd", "/c", copy], cwd=APP_DIR, creationflags=subprocess.CREATE_NO_WINDOW)
+    import threading
+
+    threading.Timer(2.0, os._exit, [0]).start()
+
+
 with tab_settings:
     v = app_version()
     st.subheader("Version")
@@ -892,8 +954,7 @@ with tab_settings:
             st.info(f"{len(chk['changes'])} update(s) available:")
             st.markdown("\n".join(f"* {d}: {msg}" for d, msg in chk["changes"]))
             if os.name == "nt":
-                live_on = any(c["last_seen"] and (dt.datetime.now() - dt.datetime.fromisoformat(c["last_seen"]))
-                              .total_seconds() < 90 for c in store.cameras())
+                live_on = live_running(store)
                 if live_on:
                     st.warning("Stop live monitoring (Live cameras tab) before updating.")
                 if st.button("Update now", type="primary", disabled=live_on):
@@ -902,6 +963,35 @@ with tab_settings:
                     start_update()
             else:
                 st.code("git pull && pip install -r requirements.txt", language="bash")
+
+    if os.name == "nt":
+        st.subheader("Start and graphics card")
+        st.caption("Everything the .bat files in the Target Capture folder do, from here. You only need "
+                   "run_windows.bat (or the Start with Windows option) to open this page.")
+        on = st.toggle("Open Target Capture when Windows starts", os.path.exists(STARTUP_FILE),
+                       help="Opens this page (its window minimized) after you sign in to Windows. Together with "
+                            "'Start live monitoring when the page opens' below, live cameras start by themselves "
+                            "after a restart or power cut.")
+        if on != os.path.exists(STARTUP_FILE):
+            set_windows_startup(on)
+            st.rerun()
+        from targetcapture.gpu import describe
+
+        gpu_on = os.path.exists(os.path.join(APP_DIR, ".venv", "gpu.txt"))
+        st.markdown(f"Graphics card: **{describe()}**" + (" · GPU support installed." if gpu_on else ""))
+        g1, g2, g3 = st.columns(3)
+        live_on = live_running(store)
+        if g1.button("Reinstall graphics-card support" if gpu_on else "Install graphics-card support (NVIDIA)",
+                     disabled=live_on, help="Same as setup_gpu_windows.bat: downloads about 3 GB, then opens "
+                                            "this page again. Needs the NVIDIA driver."):
+            st.warning("Installing in a new window. This page closes now and opens again when it is done.")
+            run_and_restart("setup_gpu_windows.bat")
+        if g2.button("Restart this page", help="Closes and opens the page again (needed after changing the "
+                                                "largest upload). Live monitoring keeps running."):
+            st.warning("Restarting… the page opens again in a few seconds.")
+            restart_page()
+        if live_on:
+            g3.caption("Stop live monitoring before installing graphics-card support.")
 
     st.subheader("Defaults")
     st.caption("Saved in settings.json. Updates keep it. Used by new indexing runs, searches and live cameras.")
@@ -944,6 +1034,9 @@ with tab_settings:
         st.markdown("**Live cameras**")
         c1, c2 = st.columns(2)
         n["keep_days"] = c1.number_input("Keep recordings (days)", 1.0, 365.0, float(CFG["keep_days"]), 1.0)
+        n["live_autostart"] = c1.checkbox("Start live monitoring when the page opens", CFG["live_autostart"],
+                                          help="No need to press Start (or run run_live_windows.bat) after "
+                                               "opening the page or restarting the computer.")
         n["live_record"] = c2.checkbox("Also record the cameras (for watching later; the live analysis does "
                                        "not need it)", CFG["live_record"])
         n["segment_seconds"] = c2.number_input("Recorded piece length (seconds)", 30, 600,
@@ -952,7 +1045,7 @@ with tab_settings:
         c1, c2 = st.columns(2)
         n["db_path"] = c1.text_input("Index database file", CFG["db_path"])
         n["max_upload_mb"] = c2.number_input("Largest upload (MB)", 200, 100000, int(CFG["max_upload_mb"]), 100,
-                                             help="Takes effect after closing and starting the page again.")
+                                             help="Takes effect after restarting the page (Restart this page, above).")
         b1, b2 = st.columns([1, 5])
         save = b1.form_submit_button("Save", type="primary")
         reset = b2.form_submit_button("Back to defaults")

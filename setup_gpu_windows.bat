@@ -1,7 +1,16 @@
 @echo off
 REM Makes Target Capture use an NVIDIA graphics card (GeForce GTX / RTX). Run once, after setup_windows.bat.
 REM Needs the NVIDIA driver (nvidia.com/drivers). Downloads about 3 GB.
-cd /d "%~dp0"
+REM The Settings tab runs a copy of this file with "restart <app folder>": it waits for the web page to
+REM close, stops live monitoring (Windows cannot replace files in use) and opens the page again at the end.
+if "%~2"=="" (cd /d "%~dp0") else (cd /d "%~2")
+if "%~1"=="restart" (
+  timeout /t 5 /nobreak >nul
+  echo Stopping Target Capture and live monitoring...
+  type nul > live.stop
+  powershell -NoProfile -Command "Start-Sleep 3; Get-CimInstance Win32_Process | Where-Object { ($_.Name -match '^python|^streamlit' -and $_.CommandLine -match 'targetcapture|streamlit') -or ($_.Name -match '^ffmpeg' -and $_.ExecutablePath -match 'imageio_ffmpeg') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+  timeout /t 2 /nobreak >nul
+)
 if not exist .venv\Scripts\python.exe (echo Run setup_windows.bat first. & pause & exit /b 1)
 where nvidia-smi >nul 2>nul || (echo No NVIDIA driver found. Install the latest driver from https://www.nvidia.com/Download/index.aspx and run this again. & pause & exit /b 1)
 nvidia-smi --query-gpu=name,driver_version --format=csv,noheader
@@ -18,6 +27,7 @@ echo.
 python -c "from targetcapture.gpu import describe; print(describe())"
 echo.
 echo Done. Start it with run_windows.bat; the left side of the page shows "GPU: <your card>".
+if "%~1"=="restart" (start "" run_windows.bat & exit /b 0)
 pause
 exit /b 0
 

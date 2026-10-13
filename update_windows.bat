@@ -8,7 +8,7 @@ if "%~1"=="restart" timeout /t 5 /nobreak >nul
 REM Stop this app and live monitoring first (it runs hidden): Windows cannot replace files they use
 echo Stopping Target Capture and live monitoring...
 type nul > live.stop
-powershell -NoProfile -Command "Start-Sleep 3; Get-CimInstance Win32_Process | Where-Object { $_.Name -match '^python|^streamlit' -and $_.CommandLine -match 'targetcapture|streamlit' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
+powershell -NoProfile -Command "Start-Sleep 3; Get-CimInstance Win32_Process | Where-Object { ($_.Name -match '^python|^streamlit' -and $_.CommandLine -match 'targetcapture|streamlit') -or ($_.Name -match '^ffmpeg' -and $_.ExecutablePath -match 'imageio_ffmpeg') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
 timeout /t 2 /nobreak >nul
 set REPO=https://github.com/ittz-soran/target-capture.git
 where git >nul 2>nul || (echo Git is not installed. Get it from https://git-scm.com/download/win & pause & exit /b 1)

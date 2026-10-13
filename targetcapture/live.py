@@ -25,8 +25,7 @@ import numpy as np
 from .store import Store
 
 log = logging.getLogger(__name__)
-# cameras over TCP: no grey smears from lost packets on busy networks
-os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
+
 SEGMENT = 60  # seconds per recorded piece
 
 
@@ -270,63 +269,108 @@ PERSON_STATE = ("_bt", "_face_try", "_faces_seen", "_untracked", "track_offset",
 
 
 class StreamReader(threading.Thread):
-    """Keeps the newest picture of one camera, reconnecting by itself."""
+    """Keeps the newest picture of one camera, reconnecting by itself.
 
-    def __init__(self, url: str, hw: bool):
+    The stream is read by ffmpeg over TCP (no broken pictures from lost network packets, which
+    UDP gives on busy networks: "PPS id out of range", grey smears), decoded on the graphics
+    card when possible, and thinned to `fps` pictures a second before it reaches Python, so
+    the rest of the program only handles the pictures it analyses."""
+
+    def __init__(self, url: str, hw: bool, fps: float = 6.0):
         super().__init__(daemon=True, name="live-reader")
-        self.url, self.hw = url, hw
-        self.stop_ev, self.want = threading.Event(), threading.Event()
+        self.url, self.hw, self.fps = url, hw, fps
+        self.stop_ev = threading.Event()
         self.lock = threading.Lock()
         self.latest = None   # (picture, wall-clock time)
         self.status = "connecting"
-        self.want.set()
+        self.proc: subprocess.Popen | None = None
+        self.err: list[str] = []
 
     def take(self):
         """The newest picture not taken yet, or None."""
         with self.lock:
             got, self.latest = self.latest, None
-        self.want.set()
         return got
 
-    def run(self):
-        from .video import open_video
+    def _command(self, exe: str) -> list[str]:
+        cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "info"]
+        if self.hw:
+            cmd += ["-hwaccel", "auto"]
+        if os.path.isfile(self.url):  # a video file played as if it were a camera (trying things out)
+            cmd += ["-re", "-stream_loop", "-1", "-i", self.url]
+        else:
+            if self.url.lower().startswith("rtsp"):
+                cmd += ["-rtsp_transport", "tcp", "-timeout", "10000000"]
+            cmd += ["-fflags", "+discardcorrupt+nobuffer", "-flags", "low_delay", "-i", self.url]
+        return cmd + ["-map", "0:v:0", "-an", "-vf", f"fps={self.fps:g}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
 
-        is_file = os.path.isfile(self.url)  # a video file played as if it were a camera (trying things out)
+    def _read_errors(self, proc, size: list):
+        """ffmpeg's messages: the picture size first, then errors (shown when it fails)."""
+        for raw in proc.stderr:
+            line = raw.decode(errors="replace").strip()
+            m = re.search(r"Stream #\S+.*Video: .*?(\d{2,5})x(\d{2,5})", line)
+            if m and not size:
+                size.extend([int(m.group(1)), int(m.group(2))])
+            elif re.search(r"error|failed|unauthorized|not found|refused|timed out", line, re.I) \
+                    and "PPS id" not in line:
+                self.err = (self.err + [line])[-5:]
+
+    def run(self):
+        exe = ffmpeg_exe()
+        if not exe:
+            self.status = "ffmpeg is missing (pip install imageio-ffmpeg)"
+            return
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
         while not self.stop_ev.is_set():
-            cap = open_video(self.url, self.hw)
-            if not cap.isOpened():
-                self.status = "not connected (check the address, user name and password)"
-                cap.release()
-                self.stop_ev.wait(5)
-                continue
-            self.status = "live"
-            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
-            t_next, fails = time.time(), 0
-            while not self.stop_ev.is_set():
-                if is_file:  # play at normal speed
-                    t_next += 1.0 / fps
-                    time.sleep(max(0.0, t_next - time.time()))
-                if not cap.grab():
-                    fails += 1
-                    if is_file:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                    if fails > 50:
+            size: list[int] = []
+            self.err = []
+            self.proc = proc = subprocess.Popen(self._command(exe), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                                stderr=subprocess.PIPE, creationflags=flags, bufsize=0)
+            threading.Thread(target=self._read_errors, args=(proc, size), daemon=True).start()
+            t0 = time.time()
+            while not size and proc.poll() is None and time.time() - t0 < 30 and not self.stop_ev.is_set():
+                time.sleep(0.05)
+            if size:
+                self.status = "live"
+                w, h = size
+                n = w * h * 3
+                while not self.stop_ev.is_set():
+                    buf = _read_exact(proc.stdout, n)
+                    if buf is None:
                         break
-                    continue
-                fails = 0
-                if self.want.is_set():  # only turn into a picture when one is wanted
-                    ok, img = cap.retrieve()
-                    if ok:
-                        with self.lock:
-                            self.latest = (img, time.time())
-                        self.want.clear()
-            cap.release()
+                    img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
+                    with self.lock:
+                        self.latest = (img, time.time())
+            self._kill(proc)
             if not self.stop_ev.is_set():
-                self.status = "connection lost, reconnecting"
-                self.stop_ev.wait(2)
+                why = explain_error(" ".join(self.err)) if self.err else "no picture"
+                self.status = f"not connected: {why} Trying again…"
+                self.stop_ev.wait(5)
+
+    @staticmethod
+    def _kill(proc):
+        if proc.poll() is None:
+            proc.kill()
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                pass
 
     def stop(self):
         self.stop_ev.set()
+        if self.proc is not None:
+            self._kill(self.proc)
+
+
+def _read_exact(stream, n: int) -> bytes | None:
+    parts, got = [], 0
+    while got < n:
+        chunk = stream.read(n - got)
+        if not chunk:
+            return None
+        parts.append(chunk)
+        got += len(chunk)
+    return b"".join(parts)
 
 
 def _state(ix, names) -> dict:
@@ -352,9 +396,9 @@ def _imwrite(path: str, img, quality: int = 88):
 
 
 class LiveCamera:
-    def __init__(self, cam, store: Store, frames_root: str, hw: bool):
+    def __init__(self, cam, store: Store, frames_root: str, hw: bool, fps: float = 6.0):
         self.cam, self.store, self.root = cam, store, frames_root
-        self.reader = StreamReader(cam["url"], hw)
+        self.reader = StreamReader(cam["url"], hw, fps)
         self.reader.start()
         self.day = None
         self.media_id = None
@@ -512,7 +556,8 @@ def run(db_path: str, root: str = "recordings", keep_days: float | None = None, 
                     plate_ix, person_ix, detector = _models(cfg, list(cams.values()))
                 for cid, cam in cams.items():
                     if cid not in live:
-                        live[cid] = LiveCamera(cam, store, frames_root, cfg["gpu_decode"])
+                        live[cid] = LiveCamera(cam, store, frames_root, cfg["gpu_decode"],
+                                               max(cfg["plate_fps"], cfg["person_fps"]) + 1)
                     else:
                         live[cid].cam = cam
                     if cfg["live_record"]:

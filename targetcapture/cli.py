@@ -146,7 +146,7 @@ def cmd_live(a):
     if not cams:
         print('No cameras. Add one: python -m targetcapture live --add "Gate" rtsp://user:pass@192.168.1.64:554/Streaming/Channels/101')
         return
-    print("Recording and indexing: " + ", ".join(c["name"] for c in cams) + ". Stop with Ctrl+C.")
+    print("Analysing live: " + ", ".join(c["name"] for c in cams) + ". Stop with Ctrl+C.")
     run(a.db, root=a.recordings, keep_days=a.keep_days, on_alert=lambda msg, _: print("ALERT", msg),
         stop_file=a.stop_file)
 
@@ -224,7 +224,7 @@ def main(argv=None):
     s.add_argument("--all", action="store_true", help="remove every video, to start fresh")
     s.set_defaults(fn=cmd_remove)
 
-    s = sub.add_parser("live", help="record live cameras and index them as they record")
+    s = sub.add_parser("live", help="analyse live cameras as the picture arrives")
     s.add_argument("--add", nargs=2, action="append", metavar=("NAME", "URL"), help="add a camera first")
     s.add_argument("--recordings", default="recordings", help="folder for the recorded pieces")
     s.add_argument("--keep-days", type=float, help="delete recordings older than this (default: Settings tab, 7)")

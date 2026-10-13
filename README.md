@@ -98,17 +98,24 @@ Under **Advanced** you can change:
 
 **Watch list**
 * Add wanted plates (wildcards allowed) and wanted people (a face photo), with a note.
-* Every video you index, and every minute of every live camera, is checked automatically. Matches show
+* Every video you index, and every live camera picture, is checked automatically. Matches show
   in the Watch list tab with pictures, and as a red banner at the top of every page (it refreshes itself).
 * Adding an entry also checks the videos that are already indexed.
 
 **Live cameras**
 * Add a camera with its stream address (Hikvision: `rtsp://USER:PASS@IP:554/Streaming/Channels/101`,
   Dahua: `rtsp://USER:PASS@IP:554/cam/realmonitor?channel=1&subtype=0`) and click **Test connection**.
-* Click **Start live monitoring** (or double-click `run_live_windows.bat`). Each camera is recorded in
-  1-minute pieces in `recordings\<camera>\`, and each piece is indexed as soon as it is finished:
-  plates, people, vehicles and watch-list alerts appear about a minute after they happen.
-* Recordings older than 7 days are deleted automatically, except pieces with a watch-list match.
+* A whole DVR / NVR: open **Add a whole DVR / NVR**, type its IP, user name, password and number of
+  channels; every channel is added as a camera (switch off the ones you do not need).
+* Click **Start live monitoring** (or double-click `run_live_windows.bat`). Each camera is analysed live,
+  as the picture arrives: plates, people, vehicles and watch-list alerts appear a second or two after they
+  happen. The tab shows what each camera sees now (with boxes), the latest plates and faces, and alerts.
+  Everything found is also searchable in the other tabs, under one entry per camera per day.
+* No recording is needed: the picture of each moment with a detection is kept in `live_frames\`.
+  To also record the cameras for watching later, tick **Also record the cameras** in Settings.
+* Pictures older than 7 days are deleted automatically, except days with a watch-list match.
+* One graphics card shares its time between cameras: the status line shows how many pictures a second
+  each camera gets. With many channels, switch off the ones that do not matter, or choose the Fast speed.
 * The PC must stay on, and the cameras must be reachable from it (same network, or a VPN).
 
 **Download results:** every search result, a plate opened with **View**, a person from All faces, the
@@ -210,7 +217,7 @@ python -m targetcapture media                        # what is indexed
 
 # 4. Live cameras (also from the web page)
 python -m targetcapture live --add "Gate" rtsp://admin:pass@192.168.1.64:554/Streaming/Channels/101
-python -m targetcapture live                         # record + index all cameras until Ctrl+C
+python -m targetcapture live                         # analyse all cameras live until Ctrl+C
 ```
 
 Each search writes `results/<query>/report.html` (snapshots and details), plus `results.json` and `results.csv`.

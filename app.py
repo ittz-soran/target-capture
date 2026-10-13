@@ -55,6 +55,9 @@ def remove_media(media_id):
     own = [os.path.abspath(UPLOADS), os.path.join(os.path.dirname(os.path.abspath(db_path)), "fixed_videos")]
     if path and os.path.isfile(path) and any(os.path.abspath(path).startswith(d + os.sep) for d in own):
         os.remove(path)
+    live_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live_frames")
+    if path and os.path.isdir(path) and os.path.abspath(path).startswith(live_dir + os.sep):
+        shutil.rmtree(path, ignore_errors=True)  # pictures of a live camera day
 
 
 @st.cache_resource
@@ -167,6 +170,74 @@ def alert_banner():
 
 
 alert_banner()
+
+
+def _live_media_ids(store):
+    root = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live_frames") + os.sep
+    return {m["id"]: m for m in store.media() if m["path"].startswith(root)}
+
+
+@st.fragment(run_every=2)
+def live_view():
+    """What the cameras see now, and the latest plates and faces they found (refreshes itself)."""
+    store = Store(db_path)  # this runs in its own thread: its own connection
+    now_dir = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live_frames", "_now")
+    cams = [c for c in store.cameras() if c["enabled"]]
+    cols = st.columns(min(3, max(1, len(cams))))
+    for i, c in enumerate(cams):
+        p = os.path.join(now_dir, f"{c['id']}.jpg")
+        with cols[i % len(cols)]:
+            if os.path.exists(p):
+                try:
+                    with open(p, "rb") as f:
+                        st.image(f.read(), caption=f"{c['name']} · {c['status'] or ''}", width="stretch")
+                except OSError:
+                    pass
+            else:
+                st.caption(f"{c['name']} · {c['status'] or 'starting'}")
+    media = _live_media_ids(store)
+    if not media:
+        return
+    ids = ",".join(str(i) for i in media)
+    names = {m_id: os.path.basename(m["path"]).rsplit("_", 1)[0] for m_id, m in media.items()}
+    alerts = [a for a in store.alerts(unseen_only=True) if a["media_id"] in media][:5]
+    for a in alerts:
+        st.error(f"Watch list: **{a['value']}** seen on {names[a['media_id']]} at "
+                 f"{clock_time(media[a['media_id']], a['start'])} ({a['text']})", icon=":material/notifications_active:")
+    left, right = st.columns(2)
+    with left:
+        st.markdown("**Latest plates**")
+        rows = store.db.execute(f"SELECT * FROM plate_reads WHERE media_id IN ({ids}) AND text != '' "
+                                "ORDER BY id DESC LIMIT 200").fetchall()
+        seen, shown = set(), 0
+        for r in rows:
+            if r["text"] in seen or shown >= 8:
+                continue
+            seen.add(r["text"])
+            shown += 1
+            c1, c2 = st.columns([1, 2])
+            th = thumbnail(r, store, THUMBS)
+            if th:
+                c1.image(th, width="stretch")
+            c2.markdown(f"**{r['text']}**  \n{names[r['media_id']]} · {clock_time(media[r['media_id']], r['t'])[11:]}"
+                        f"  \n{(r['vehicle_color'] or '')} {(r['vehicle_model'] or r['vehicle_type'] or '')}")
+    with right:
+        st.markdown("**Latest faces**")
+        rows = store.db.execute(f"SELECT * FROM person_dets WHERE media_id IN ({ids}) AND fx1 IS NOT NULL "
+                                "ORDER BY id DESC LIMIT 200").fetchall()
+        seen, shown = set(), 0
+        for r in rows:
+            key = (r["media_id"], r["track_id"])
+            if key in seen or shown >= 8:
+                continue
+            seen.add(key)
+            shown += 1
+            c1, c2 = st.columns([1, 2])
+            th = thumbnail(r, store, THUMBS, box=("fx1", "fy1", "fx2", "fy2"), pad=0.3, min_w=96)
+            if th:
+                c1.image(th, width="stretch")
+            c2.markdown(f"Person {r['track_id']}  \n{names[r['media_id']]} · "
+                        f"{clock_time(media[r['media_id']], r['t'])[11:]}")
 
 (tab_index, tab_plate, tab_person, tab_car, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
  tab_tips, tab_settings) = st.tabs(["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
@@ -412,10 +483,10 @@ with tab_watch:
             st.rerun()
 
 with tab_cams:
-    st.caption("Connect DVR / NVR / IP cameras. Each camera is recorded in 1-minute pieces and indexed "
-               "straight away: plates, people, vehicles and watch-list alerts about a minute after "
-               f"they happen. Recordings are kept {CFG['keep_days']:g} days (pieces with a watch-list match are "
-               "kept); change this in Settings.")
+    st.caption("Connect DVR / NVR / IP cameras. Each camera is analysed live, as the picture arrives: plates, "
+               "people, vehicles and watch-list alerts show up a second or two after they happen, and everything "
+               "found is searchable in the other tabs. The pictures of each moment with a detection are kept "
+               f"{CFG['keep_days']:g} days (days with a watch-list match are kept); change this in Settings.")
     stop_file = os.path.join(os.path.dirname(os.path.abspath(db_path)), "live.stop")
     cams = store.cameras()
     now = dt.datetime.now()
@@ -426,7 +497,7 @@ with tab_cams:
         b2.success("Live monitoring is running.")
         if b1.button("Stop live monitoring"):
             open(stop_file, "w").close()
-            st.info("Stopping after the minute it is working on…")
+            st.info("Stopping…")
     else:
         b2.info("Live monitoring is stopped. Start it here, or double-click run_live_windows.bat.")
         if b1.button("Start live monitoring", type="primary", disabled=not cams):
@@ -447,6 +518,8 @@ with tab_cams:
         if row[3].button("Remove", key=f"cam_rm_{c['id']}"):
             store.remove_camera(c["id"])
             st.rerun()
+    if running and cams:
+        live_view()
     with st.form("add_cam"):
         st.markdown("**Add a camera**")
         cn = st.text_input("Name", placeholder="Front gate")
@@ -472,6 +545,47 @@ with tab_cams:
             if add and ok and cn:
                 store.add_camera(cn, cu, cp, cpp)
                 st.success(f"Added {cn}.")
+    with st.expander("Add a whole DVR / NVR (all its channels at once)"):
+        with st.form("add_dvr"):
+            d1, d2, d3 = st.columns(3)
+            dname = d1.text_input("Name", "DVR")
+            dip = d2.text_input("IP address", placeholder="192.168.1.100")
+            dbrand = d3.selectbox("Make", ["Hikvision / HiLook", "Dahua / Imou"])
+            d4, d5, d6 = st.columns(3)
+            duser = d4.text_input("User name", "admin")
+            dpass = d5.text_input("Password", type="password")
+            dch = d6.number_input("Number of channels", 1, 64, 4)
+            k1, k2 = st.columns(2)
+            dp = k1.checkbox("Read plates", True, key="dvr_p")
+            dpp = k2.checkbox("Find people", True, key="dvr_pp")
+            if st.form_submit_button("Test channel 1 and add all channels", type="primary") and dip and dpass:
+                from urllib.parse import quote
+
+                from targetcapture.live import test_camera
+
+                auth = f"{quote(duser, safe='')}:{quote(dpass, safe='')}"
+
+                def url(ch):
+                    if dbrand.startswith("Hik"):
+                        return f"rtsp://{auth}@{dip.strip()}:554/Streaming/Channels/{ch}01"
+                    return f"rtsp://{auth}@{dip.strip()}:554/cam/realmonitor?channel={ch}&subtype=0"
+
+                with st.spinner("Connecting to channel 1…"):
+                    ok, msg, jpg = test_camera(url(1))
+                if not ok:
+                    st.error(f"Could not connect: {msg}")
+                else:
+                    st.image(jpg, caption="Channel 1", width=480)
+                    have = {c["name"] for c in store.cameras()}
+                    added = 0
+                    for ch in range(1, int(dch) + 1):
+                        name = f"{dname} ch{ch}"
+                        if name not in have:
+                            store.add_camera(name, url(ch), dp, dpp)
+                            added += 1
+                    st.success(f"Added {added} channel(s). Switch off any channel you do not need; each one "
+                               "uses part of the graphics card.")
+
                 st.rerun()
             elif add and not cn:
                 st.error("Give the camera a name.")
@@ -779,6 +893,8 @@ with tab_settings:
         st.markdown("**Live cameras**")
         c1, c2 = st.columns(2)
         n["keep_days"] = c1.number_input("Keep recordings (days)", 1.0, 365.0, float(CFG["keep_days"]), 1.0)
+        n["live_record"] = c2.checkbox("Also record the cameras (for watching later; the live analysis does "
+                                       "not need it)", CFG["live_record"])
         n["segment_seconds"] = c2.number_input("Recorded piece length (seconds)", 30, 600,
                                                int(CFG["segment_seconds"]), 30)
         st.markdown("**Web page**")

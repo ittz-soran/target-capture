@@ -34,6 +34,7 @@ DEFAULTS = {
     # Live cameras
     "keep_days": 7.0,
     "segment_seconds": 60,
+    "live_record": False,     # also record live cameras in pieces (analysis does not need it)
     # Web page
     "db_path": "targetcapture.db",
     "max_upload_mb": 20000,   # read by run_windows.bat when the page starts

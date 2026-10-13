@@ -1,6 +1,9 @@
-"""Live cameras: record each camera (RTSP / HTTP stream) in 1-minute pieces with ffmpeg and
-index every finished piece straight away, so plates, people, vehicles and watch-list alerts
-appear about a minute after they happen. Recordings older than `keep_days` are deleted.
+"""Live cameras and DVR / NVR channels (RTSP / HTTP streams), analysed as the picture arrives:
+plates, people, vehicles and watch-list alerts appear a second or two after they happen. The
+picture of every moment with a detection is kept (live_frames/), so results show the exact
+frame; no recording is needed. Optionally each camera is also recorded in pieces with ffmpeg
+for watching later (Settings: live_record). Pictures and recordings older than `keep_days`
+are deleted, except days with a watch-list alert.
 
     python -m targetcapture live            # runs until stopped (Ctrl+C)
 """
@@ -13,11 +16,17 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 
-from .store import Store, clock_time
+import cv2
+import numpy as np
+
+from .store import Store
 
 log = logging.getLogger(__name__)
+# cameras over TCP: no grey smears from lost packets on busy networks
+os.environ.setdefault("OPENCV_FFMPEG_CAPTURE_OPTIONS", "rtsp_transport;tcp")
 SEGMENT = 60  # seconds per recorded piece
 
 
@@ -103,77 +112,367 @@ def _clock_of(path: str) -> str | None:
     return f"{m[1]} {m[2]}:{m[3]}:{m[4]}" if m else None
 
 
+LIVE_FPS = 25.0   # frame numbers of live pictures: seconds since midnight x 25
+FRAMES = "live_frames"
+
+# what the plate reader and people finder remember about one camera (tracks, faces seen...);
+# swapped in and out so one set of models serves every camera
+PLATE_STATE = ("_tracker", "_tracks", "vehicle_rows", "_t", "_latin_seen", "memory", "skip_empty",
+               "track_offset", "timing", "max_model_looks")
+PERSON_STATE = ("_bt", "_face_try", "_faces_seen", "_untracked", "track_offset", "timing")
+
+
+class StreamReader(threading.Thread):
+    """Keeps the newest picture of one camera, reconnecting by itself."""
+
+    def __init__(self, url: str, hw: bool):
+        super().__init__(daemon=True, name="live-reader")
+        self.url, self.hw = url, hw
+        self.stop_ev, self.want = threading.Event(), threading.Event()
+        self.lock = threading.Lock()
+        self.latest = None   # (picture, wall-clock time)
+        self.status = "connecting"
+        self.want.set()
+
+    def take(self):
+        """The newest picture not taken yet, or None."""
+        with self.lock:
+            got, self.latest = self.latest, None
+        self.want.set()
+        return got
+
+    def run(self):
+        from .video import open_video
+
+        is_file = os.path.isfile(self.url)  # a video file played as if it were a camera (trying things out)
+        while not self.stop_ev.is_set():
+            cap = open_video(self.url, self.hw)
+            if not cap.isOpened():
+                self.status = "not connected (check the address, user name and password)"
+                cap.release()
+                self.stop_ev.wait(5)
+                continue
+            self.status = "live"
+            fps = cap.get(cv2.CAP_PROP_FPS) or 25.0
+            t_next, fails = time.time(), 0
+            while not self.stop_ev.is_set():
+                if is_file:  # play at normal speed
+                    t_next += 1.0 / fps
+                    time.sleep(max(0.0, t_next - time.time()))
+                if not cap.grab():
+                    fails += 1
+                    if is_file:
+                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    if fails > 50:
+                        break
+                    continue
+                fails = 0
+                if self.want.is_set():  # only turn into a picture when one is wanted
+                    ok, img = cap.retrieve()
+                    if ok:
+                        with self.lock:
+                            self.latest = (img, time.time())
+                        self.want.clear()
+            cap.release()
+            if not self.stop_ev.is_set():
+                self.status = "connection lost, reconnecting"
+                self.stop_ev.wait(2)
+
+    def stop(self):
+        self.stop_ev.set()
+
+
+def _state(ix, names) -> dict:
+    return {k: getattr(ix, k) for k in names if hasattr(ix, k)}
+
+
+def _restore(ix, state: dict):
+    for k, v in state.items():
+        setattr(ix, k, v)
+
+
+def _imwrite(path: str, img, quality: int = 88):
+    """cv2.imwrite fails on some Windows folder names; encoding first works everywhere."""
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if ok:
+        tmp = path + ".tmp"
+        with open(tmp, "wb") as f:
+            f.write(buf.tobytes())
+        try:
+            os.replace(tmp, path)
+        except OSError:  # the page is reading it right now (Windows): next time
+            pass
+
+
+class LiveCamera:
+    def __init__(self, cam, store: Store, frames_root: str, hw: bool):
+        self.cam, self.store, self.root = cam, store, frames_root
+        self.reader = StreamReader(cam["url"], hw)
+        self.reader.start()
+        self.day = None
+        self.media_id = None
+        self.dir = None
+        self.last = {"plates": 0.0, "persons": 0.0}
+        self.states: dict[str, dict] = {}
+        self.analysed: list[float] = []   # times of analysed pictures (speed shown on the page)
+        self.last_sig, self.last_t = None, 0.0
+        self.recent_alerts: dict[int, float] = {}
+
+    def ensure_day(self, now: dt.datetime, plate_ix, person_ix, cfg, img):
+        """One index entry per camera per day; a new day starts fresh tracks."""
+        day = now.strftime("%Y-%m-%d")
+        if day == self.day:
+            return
+        from .teach import Memory
+        from .video import MediaInfo
+
+        self.day = day
+        self.dir = os.path.abspath(os.path.join(self.root, f"{_slug(self.cam['name'])}_{day}"))
+        os.makedirs(self.dir, exist_ok=True)
+        info = MediaInfo(self.dir, "video", LIVE_FPS, 0, img.shape[1], img.shape[0])
+        self.media_id = self.store.upsert_media(info, f"{day} 00:00:00")
+        self.states = {}
+        if plate_ix is not None:
+            plate_ix.start(memory=Memory(self.store), track_offset=self.store.max_vehicle_track(self.media_id) + 1,
+                           skip_empty=cfg["skip_empty_road"])
+            plate_ix.max_model_looks = cfg["model_looks"]
+            self.states["plates"] = _state(plate_ix, PLATE_STATE)
+        if person_ix is not None:
+            person_ix.start(track_offset=self.store.max_track_id(self.media_id) + 1)
+            self.states["persons"] = _state(person_ix, PERSON_STATE)
+
+    def stop(self):
+        self.reader.stop()
+        self.reader.join(timeout=10)  # release the stream before the program ends
+
+
+def _models(cfg, cams):
+    """Load the models once for every camera (they are the slow part to load)."""
+    from . import persons as P
+    from . import plates as L
+    from .pipeline import _INDEXERS, Detector
+
+    plate_ix = person_ix = None
+    if any(c["plates"] for c in cams):
+        car = cfg["car_model_size"] if cfg["car_models"] else False
+        key = ("plates", cfg["min_ocr_conf"], cfg["vehicle_crops"], cfg["plate_script"], car)
+        if key not in _INDEXERS:
+            _INDEXERS[key] = L.PlateIndexer(min_ocr_conf=cfg["min_ocr_conf"], vehicle_crops=cfg["vehicle_crops"],
+                                            script=cfg["plate_script"], car_models=car)
+        plate_ix = _INDEXERS[key]
+    if any(c["persons"] for c in cams):
+        if "persons" not in _INDEXERS:
+            _INDEXERS["persons"] = P.PersonIndexer()
+        person_ix = _INDEXERS["persons"]
+    if "detector" not in _INDEXERS:
+        _INDEXERS["detector"] = Detector()
+    return plate_ix, person_ix, _INDEXERS["detector"]
+
+
+def _draw(img, plate_rows, person_rows, vehicles):
+    out = img.copy()
+    for v in vehicles:
+        cv2.rectangle(out, (v["x1"], v["y1"]), (v["x2"], v["y2"]), (200, 160, 0), 2)
+    for r in person_rows:
+        cv2.rectangle(out, (r["x1"], r["y1"]), (r["x2"], r["y2"]), (0, 200, 0), 2)
+        if r.get("fx1") is not None:
+            cv2.rectangle(out, (r["fx1"], r["fy1"]), (r["fx2"], r["fy2"]), (0, 255, 255), 2)
+    for r in plate_rows:
+        cv2.rectangle(out, (r["x1"], r["y1"]), (r["x2"], r["y2"]), (0, 0, 255), 3)
+        if r["text"]:
+            cv2.putText(out, r["text"], (r["x1"], max(20, r["y1"] - 8)), cv2.FONT_HERSHEY_SIMPLEX,
+                        max(0.8, out.shape[1] / 1600), (0, 0, 255), 2)
+    if out.shape[1] > 960:
+        out = cv2.resize(out, (960, int(out.shape[0] * 960 / out.shape[1])), interpolation=cv2.INTER_AREA)
+    return out
+
+
+def _check_watch(store, lc: LiveCamera, watch, plate_rows, person_rows, cfg, on_alert):
+    """Watch list on the newest results only (instant, however big the index gets)."""
+    from . import plates as L
+
+    now = time.time()
+    hits = []
+    for w in watch:
+        if now - lc.recent_alerts.get(w["id"], 0) < 60:  # one alert a minute per wanted plate / face
+            continue
+        if w["kind"] == "plate":
+            for r in plate_rows:
+                if r["text"] and L.match_score(w["value"], r["text"], int(cfg["watch_plate_dist"]))[0]:
+                    hits.append((w, r, r["text"], 1.0, ("x1", "y1", "x2", "y2")))
+                    break
+        elif w["emb"] is not None:
+            e = np.frombuffer(w["emb"], np.float32)
+            e = e / (np.linalg.norm(e) + 1e-9)
+            for r in person_rows:
+                if r.get("emb") is None:
+                    continue
+                f = np.asarray(r["emb"], np.float32)
+                sim = float(f @ e / (np.linalg.norm(f) + 1e-9))
+                if sim >= cfg["face_threshold"]:
+                    hits.append((w, r, f"face {sim:.0%} alike", sim, ("fx1", "fy1", "fx2", "fy2")))
+                    break
+    for w, r, text, score, box in hits:
+        lc.recent_alerts[w["id"]] = now
+        a = {"watch_id": w["id"], "media_id": lc.media_id, "start": r["t"], "end": r["t"], "text": text,
+             "score": score, "frame": r["frame"], **{k: r[b] for k, b in zip(("x1", "y1", "x2", "y2"), box)}}
+        if store.add_alert(a):
+            at = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            msg = f"[{lc.cam['name']}] {w['kind']} {w['value']} matched ({text}) at {at}"
+            log.warning("ALERT %s", msg)
+            if on_alert:
+                on_alert(msg, {**a, "kind": w["kind"], "value": w["value"]})
+
+
 def run(db_path: str, root: str = "recordings", keep_days: float | None = None, poll: float = 10.0,
-        on_alert=None, stop_file: str | None = None, segment: int | None = None, max_loops: int | None = None):
-    """Record and index all enabled cameras until stopped (Ctrl+C, or `stop_file` appears).
+        on_alert=None, stop_file: str | None = None, segment: int | None = None, max_loops: int | None = None,
+        max_seconds: float | None = None):
+    """Analyse all enabled cameras live until stopped (Ctrl+C, or `stop_file` appears).
     keep_days, segment and the indexing options not given come from the Settings tab."""
     from . import settings
-    from .pipeline import index_media
+    from .video import Frame, _motion_signature
 
     cfg = settings.load()
+    cfg.update(settings.rates(cfg))
     keep_days = cfg["keep_days"] if keep_days is None else keep_days
     segment = int(cfg["segment_seconds"]) if segment is None else segment
-    opts = {k: cfg[k] for k in ("plate_script", "car_models", "vehicle_crops", "min_ocr_conf")}
-    opts.update(settings.rates(cfg))  # speed choice of the Settings tab
-    opts["skip_empty_road"] = cfg["skip_empty_road"]
+    frames_root = os.path.join(os.path.dirname(os.path.abspath(db_path)), FRAMES)
+    preview_dir = os.path.join(frames_root, "_now")
+    os.makedirs(preview_dir, exist_ok=True)
 
     store = Store(db_path)
+    cams_rows = store.cameras(enabled_only=True)
+    plate_ix, person_ix, detector = _models(cfg, cams_rows)
+    live: dict[int, LiveCamera] = {}
     recorders: dict[int, Recorder] = {}
-    done: set[str] = {m["path"] for m in store.media() if m["plates_done"] or m["persons_done"]}
+    watch, watch_at, status_at, commit_at, cams_at, clean_at = [], 0.0, 0.0, time.time(), 0.0, 0.0
+    began = time.time()
     try:
         while not (stop_file and os.path.exists(stop_file)):
-            cams = {c["id"]: c for c in store.cameras(enabled_only=True)}
-            for cid in list(recorders):
-                if cid not in cams or recorders[cid].cam["url"] != cams[cid]["url"]:
-                    recorders.pop(cid).stop()
-            for cid, cam in cams.items():
-                rec = recorders.setdefault(cid, Recorder(cam, root, segment))
-                was_running = rec.proc is not None and rec.proc.poll() is None
-                rec.ensure_running()
-                now = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                if rec.proc.poll() is None:
-                    store.update_camera(cid, status="recording", last_seen=now)
-                elif not was_running:
-                    err = rec.proc.stderr.read().decode(errors="replace")[-200:] if rec.proc.stderr else ""
-                    store.update_camera(cid, status=f"not connected: {err.strip() or 'stream ended'}")
-                for piece in rec.finished_pieces():
-                    full = os.path.abspath(piece)
-                    if full in done:
-                        continue
-                    beat = [0.0]
-
-                    def heartbeat(*_):  # keep the page showing "running" while a piece is indexed
-                        if time.time() - beat[0] > 10:
-                            beat[0] = time.time()
-                            stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            for c in cams:
-                                store.update_camera(c, last_seen=stamp)
-
-                    try:
-                        res = index_media(store, full, plates=bool(cam["plates"]), persons=bool(cam["persons"]),
-                                          clock_start=_clock_of(full), progress=heartbeat, **opts)
-                    except Exception as e:  # a broken piece must not stop the cameras
-                        log.warning("could not index %s: %s", full, e)
-                        res = {}
-                    done.add(full)
-                    for a in res.get("alerts", []):
-                        at = clock_time(store.media(a["media_id"]), a["start"]) or _clock_of(full)
-                        msg = f"[{cam['name']}] {a['kind']} {a['value']} matched ({a['text']}) at {at}"
-                        log.warning("ALERT %s", msg)
-                        if on_alert:
-                            on_alert(msg, a)
-            _cleanup(store, root, keep_days)
+            now = time.time()
+            if max_seconds is not None and now - began > max_seconds:
+                break
+            if now - cams_at > 5:  # cameras added, removed or switched off in the page
+                cams_at = now
+                cams = {c["id"]: c for c in store.cameras(enabled_only=True)}
+                for cid in list(live):
+                    if cid not in cams or live[cid].cam["url"] != cams[cid]["url"]:
+                        live.pop(cid).stop()
+                for cid in list(recorders):
+                    if cid not in cams or not cfg["live_record"]:
+                        recorders.pop(cid).stop()
+                if any(cid not in live for cid in cams):
+                    plate_ix, person_ix, detector = _models(cfg, list(cams.values()))
+                for cid, cam in cams.items():
+                    if cid not in live:
+                        live[cid] = LiveCamera(cam, store, frames_root, cfg["gpu_decode"])
+                    else:
+                        live[cid].cam = cam
+                    if cfg["live_record"]:
+                        recorders.setdefault(cid, Recorder(cam, root, segment)).ensure_running()
+            if now - watch_at > 10:
+                watch, watch_at = store.watchlist(active_only=True), now
+            busy = False
+            for lc in list(live.values()):
+                cam = lc.cam
+                due = [k for k, on, fps in (("plates", cam["plates"] and plate_ix, cfg["plate_fps"]),
+                                            ("persons", cam["persons"] and person_ix, cfg["person_fps"]))
+                       if on and now - lc.last[k] >= 1.0 / fps]
+                if not due:
+                    continue
+                got = lc.reader.take()
+                if got is None:
+                    continue
+                img, wall = got
+                busy = True
+                for k in due:
+                    lc.last[k] = now
+                stamp = dt.datetime.fromtimestamp(wall)
+                lc.ensure_day(stamp, plate_ix, person_ix, cfg, img)
+                t = (stamp - stamp.replace(hour=0, minute=0, second=0, microsecond=0)).total_seconds()
+                # nothing moved: skip (but still look every 5 s)
+                sig = _motion_signature(img)
+                if lc.last_sig is not None and float(np.abs(sig - lc.last_sig).mean()) < 1.5 and t - lc.last_t < 5:
+                    continue
+                lc.last_sig, lc.last_t = sig, t
+                frame = Frame(int(round(t * LIVE_FPS)), t, img, tuple(due), detector(img))
+                plate_rows, person_rows, vehicles = [], [], []
+                if "plates" in due:
+                    _restore(plate_ix, lc.states["plates"])
+                    plate_rows = plate_ix.process(frame)
+                    vehicles = plate_ix.drain_vehicles()
+                    lc.states["plates"] = _state(plate_ix, PLATE_STATE)
+                if "persons" in due:
+                    _restore(person_ix, lc.states["persons"])
+                    person_rows = person_ix.process(frame)
+                    lc.states["persons"] = _state(person_ix, PERSON_STATE)
+                lc.analysed = [x for x in lc.analysed if now - x < 10] + [now]
+                if plate_rows or person_rows or vehicles:
+                    _imwrite(os.path.join(lc.dir, f"{frame.index:08d}.jpg"), img)
+                    store.add_plate_reads(lc.media_id, plate_rows)
+                    store.add_person_dets(lc.media_id, person_rows)
+                    if vehicles:
+                        store.add_vehicle_dets(lc.media_id, vehicles)
+                    if watch:
+                        _check_watch(store, lc, watch, plate_rows, person_rows, cfg, on_alert)
+                _imwrite(os.path.join(preview_dir, f"{cam['id']}.jpg"), _draw(img, plate_rows, person_rows, vehicles),
+                         80)
+            now = time.time()
+            if now - commit_at > 2:
+                for lc in live.values():
+                    if lc.media_id is not None and lc.last_t:
+                        store.db.execute("UPDATE media SET frames=MAX(frames, ?) WHERE id=?",
+                                         (int(lc.last_t * LIVE_FPS), lc.media_id))
+                store.db.commit()
+                commit_at = now
+            if now - status_at > 5:
+                status_at = now
+                stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                for cid, lc in live.items():
+                    st = lc.reader.status
+                    if st == "live":
+                        rate = len(lc.analysed) / 10.0
+                        st = f"live · analysing {rate:.1f} pictures/s"
+                    store.update_camera(cid, status=st, last_seen=stamp)
+            if now - clean_at > 600:
+                clean_at = now
+                _cleanup(store, root, keep_days)
+                _cleanup_frames(store, frames_root, keep_days)
             if max_loops is not None:
                 max_loops -= 1
                 if max_loops <= 0:
                     break
-            time.sleep(poll)
+            if not busy:
+                time.sleep(0.02)
     finally:
-        for cid, rec in recorders.items():
+        store.db.commit()
+        for lc in live.values():
+            lc.stop()
+        for rec in recorders.values():
             rec.stop()
+        for cid in set(live) | set(recorders):
             store.update_camera(cid, status="stopped", last_seen=None)
         if stop_file and os.path.exists(stop_file):
             os.remove(stop_file)
+
+
+def _cleanup_frames(store, frames_root: str, keep_days: float):
+    """Forget live days older than keep_days and delete their pictures, except days with a
+    watch-list alert, which are kept as evidence."""
+    limit = dt.datetime.now() - dt.timedelta(days=keep_days)
+    with_alerts = {a["media_id"] for a in store.alerts()}
+    root = os.path.abspath(frames_root) + os.sep
+    for m in store.media():
+        p = m["path"]
+        if not p.startswith(root) or m["id"] in with_alerts or not m["clock_start"]:
+            continue
+        try:
+            day = dt.datetime.strptime(m["clock_start"][:10], "%Y-%m-%d")
+        except ValueError:
+            continue
+        if day + dt.timedelta(days=1) < limit:
+            store.remove_media(m["id"])
+            shutil.rmtree(p, ignore_errors=True)
 
 
 def _cleanup(store, root: str, keep_days: float):

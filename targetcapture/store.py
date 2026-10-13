@@ -8,6 +8,7 @@ import datetime as dt
 import os
 import sqlite3
 
+import cv2
 import numpy as np
 
 from .video import SIG_H, SIG_W, read_frame
@@ -190,6 +191,12 @@ class Store:
         media = self.media(row["media_id"]) if row["media_id"] is not None else None
         if not media:
             return None
+        if os.path.isdir(media["path"]):  # a live camera day: the pictures were kept as they came
+            f = os.path.join(media["path"], f"{row['frame']:08d}.jpg")
+            try:
+                return cv2.imdecode(np.fromfile(f, np.uint8), cv2.IMREAD_COLOR)
+            except (OSError, ValueError):
+                return None
         return read_frame(media["path"], row["frame"], self.frame_sig(row), hw=media["decoder"] == "gpu")
 
     def decoder(self, media_id: int, wanted: str) -> str:

@@ -1094,14 +1094,51 @@ with tab_settings:
     st.subheader("Storage")
     db_dir = os.path.dirname(os.path.abspath(db_path))
     places = {"Index database": db_path, "Uploaded videos": UPLOADS, "Repaired DVR videos": os.path.join(db_dir, "fixed_videos"),
-              "Live recordings": "recordings", "Results and pictures": RESULTS}
+              "Live recordings": "recordings", "Live camera pictures": os.path.join(db_dir, "live_frames"),
+              "Results and pictures": RESULTS}
     sizes = {k: folder_size(p) for k, p in places.items() if os.path.exists(p)}
     free = shutil.disk_usage(APP_DIR).free
     st.markdown("\n".join(f"* {k}: **{human(b)}**" for k, b in sizes.items()) + f"\n* Free disk space: **{human(free)}**")
     counts = store.db.execute("SELECT (SELECT COUNT(*) FROM media), (SELECT COUNT(*) FROM plate_reads), "
                               "(SELECT COUNT(*) FROM person_dets)").fetchone()
     st.caption(f"{counts[0]} videos/images indexed · {counts[1]} plate reads · {counts[2]} person detections")
-    if st.button("Clear saved result pictures", help="Search results and reports in the results folder. "
+    k1, k2, k3 = st.columns(3)
+    if k1.button("Clear saved result pictures", help="Search results and reports in the results folder. "
                  "They are made again when you search; nothing in the index is lost."):
         shutil.rmtree(RESULTS, ignore_errors=True)
         st.success("Cleared.")
+    live_on = live_running(store)
+
+    def clear_folder(folder):
+        """Remove every indexed video / camera day kept in `folder`, then the folder's files."""
+        root = os.path.abspath(folder) + os.sep
+        for m in store.db.execute("SELECT id, path FROM media").fetchall():
+            if m["path"] and os.path.abspath(m["path"]).startswith(root):
+                remove_media(m["id"])
+        shutil.rmtree(folder, ignore_errors=True)
+        left = folder_size(folder) if os.path.exists(folder) else 0
+        return left
+
+    with k2.popover("Delete live recordings", disabled=live_on or not os.path.exists("recordings"),
+                    help="Stop live monitoring first." if live_on else "Recorded camera video (the live analysis "
+                         "does not need it)."):
+        st.write(f"Delete all recorded camera video ({human(sizes.get('Live recordings', 0))})? "
+                 "Anything indexed from it is removed from the index too.")
+        if st.button("Yes, delete", key="del_rec", type="primary"):
+            left = clear_folder("recordings")
+            st.session_state["storage_msg"] = "Deleted." if not left else f"Deleted, except {human(left)} of files in use."
+            st.rerun()
+    frames = places["Live camera pictures"]
+    with k3.popover("Delete live camera results", disabled=live_on or not os.path.exists(frames),
+                    help="Stop live monitoring first." if live_on else "Plates, people and pictures found by the "
+                         "live cameras."):
+        st.write(f"Delete everything the live cameras found, with its pictures "
+                 f"({human(sizes.get('Live camera pictures', 0))})? The cameras themselves stay set up.")
+        if st.button("Yes, delete", key="del_frames", type="primary"):
+            left = clear_folder(frames)
+            st.session_state["storage_msg"] = "Deleted." if not left else f"Deleted, except {human(left)} of files in use."
+            st.rerun()
+    if live_on:
+        st.caption("Stop live monitoring (Live cameras tab) to delete live recordings or results.")
+    if "storage_msg" in st.session_state:
+        st.success(st.session_state.pop("storage_msg"))

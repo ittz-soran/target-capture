@@ -4,6 +4,7 @@
 """
 import datetime as dt
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -570,7 +571,8 @@ with tab_cams:
                 if not dip.strip() or not dpass:
                     st.error("Type the DVR's IP address and password.")
                 else:
-                    from targetcapture.live import check_login, dvr_urls, explain_error, test_camera
+                    from targetcapture.live import (check_login, dvr_urls, explain_error, hik_rtsp_port, refused_login,
+                                                    test_camera)
 
                     found, last_err = None, ""
                     with st.status("Connecting to channel 1…", expanded=True) as box:
@@ -580,9 +582,14 @@ with tab_cams:
                             last_err = info
                             st.write(f"The DVR says: {info}.")
                         else:
+                            port = int(dport)
                             if login:
                                 st.write(f"Login is correct{' (' + info + ')' if info else ''}.")
-                            for forms in dvr_urls(dbrand, dip.strip(), int(dport), duser, dpass):
+                                set_port = hik_rtsp_port(dip.strip(), duser, dpass) if dbrand.startswith("Hik") else None
+                                if set_port and set_port != port:
+                                    st.write(f"The DVR's RTSP port is {set_port}, using that.")
+                                    port = set_port
+                            for forms in dvr_urls(dbrand, dip.strip(), port, duser, dpass):
                                 for label, make in forms:
                                     st.write(f"Trying {label}…")
                                     ok, msg, jpg = test_camera(make(1), timeout=10)
@@ -590,19 +597,23 @@ with tab_cams:
                                         found = (label, make, jpg)
                                         break
                                     last_err = msg
-                                    if "401" in msg or "nauthorized" in msg:
+                                    st.caption(explain_error(msg))
+                                    if refused_login(msg):
                                         break  # same login on every path: do not lock the DVR with retries
                                 if found:
                                     break
                         box.update(label="Connected" if found else "Could not connect",
                                    state="complete" if found else "error")
-                    if not found and login and ("401" in last_err or "nauthorized" in last_err):
+                    if not found and login and refused_login(last_err):
                         last_err = ("the login is right for the web page, but the DVR refuses it for video. In "
                                     "the DVR's web page open Configuration > System > Security > Authentication "
                                     "and set RTSP Authentication to 'digest/basic', and check that this user "
                                     "may watch live video (User Management > Permissions > Live View).")
                     if not found:
                         st.error(f"Could not connect to channel 1: {explain_error(last_err)}")
+                        if last_err:
+                            with st.expander("Details (send these if you ask for help)"):
+                                st.code(re.sub(r"(rtsp://[^:/@]+:)[^@]+@", r"\1****@", last_err)[-1500:])
                     else:
                         label, make, jpg = found
                         st.image(jpg, caption=f"Channel 1 ({label})", width=480)

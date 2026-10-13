@@ -116,10 +116,16 @@ def check_login(make: str, ip: str, user: str, password: str) -> tuple[bool | No
     return None, ""
 
 
+def refused_login(msg: str) -> bool:
+    """The camera answered and turned the user name / password down."""
+    return "unauthorized" in (msg or "").lower()
+
+
 def explain_error(msg: str) -> str:
-    """ffmpeg's message in plain words."""
-    m = (msg or "").lower()
-    if "401" in m or "unauthorized" in m:
+    """ffmpeg's message in plain words (the codes are looked for in words only: addresses and
+    memory numbers in the message, like 0x55d01a401540, contain digits too)."""
+    m = re.sub(r"rtsp://\S+|0x[0-9a-f]+", " ", (msg or "").lower())
+    if "unauthorized" in m:
         return "wrong user name or password (or that user may not watch live video)."
     if "404" in m or "not found" in m:
         return "the DVR has no such channel at this address."
@@ -128,7 +134,20 @@ def explain_error(msg: str) -> str:
     if "no answer" in m or "timed out" in m or "timeout" in m or "unreachable" in m:
         return ("no answer: check the IP address, that this PC is on the same network, and that RTSP is "
                 "allowed in the DVR's network settings.")
-    return msg or "could not read the stream."
+    return "could not read the stream."
+
+
+def hik_rtsp_port(ip: str, user: str, password: str) -> int | None:
+    """The RTSP port a Hikvision DVR / camera is set to (its network settings), or None."""
+    import requests
+    from requests.auth import HTTPDigestAuth
+
+    try:
+        r = requests.get(f"http://{ip}/ISAPI/Security/adminAccesses", auth=HTTPDigestAuth(user, password), timeout=6)
+    except requests.RequestException:
+        return None
+    m = re.search(r"<protocol>\s*RTSP\s*</protocol>\s*<portNo>\s*(\d+)", r.text, re.I) if r.ok else None
+    return int(m.group(1)) if m else None
 
 
 def _slug(name: str) -> str:

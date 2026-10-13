@@ -4,7 +4,6 @@
 """
 import datetime as dt
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -538,7 +537,7 @@ with tab_cams:
             from targetcapture.live import test_camera
 
             with st.spinner("Connecting…"):
-                ok, msg, jpg = test_camera(cu)
+                ok, msg, jpg = test_camera(cu, timeout=30)
             if ok:
                 st.image(jpg, caption="Picture from the camera", width=480)
             else:
@@ -554,6 +553,13 @@ with tab_cams:
                      expanded="dvr_msg" in st.session_state):
         if "dvr_msg" in st.session_state:
             st.success(st.session_state.pop("dvr_msg"))
+            pic = st.session_state.pop("dvr_pic", None)
+            if pic:
+                st.image(pic, caption="Channel 1", width=480)
+            else:
+                st.warning("The address and login are right, but no picture arrived from channel 1 within 30 "
+                           "seconds (some DVRs send a full picture only every few seconds, or the channel has no "
+                           "camera). The live view shows it once pictures arrive.")
         with st.form("add_dvr"):
             d1, d2, d3 = st.columns(3)
             dname = d1.text_input("Name", "DVR")
@@ -571,52 +577,58 @@ with tab_cams:
                 if not dip.strip() or not dpass:
                     st.error("Type the DVR's IP address and password.")
                 else:
-                    from targetcapture.live import (check_login, dvr_urls, explain_error, hik_rtsp_port, refused_login,
-                                                    test_camera)
+                    from targetcapture.live import (check_login, dvr_paths, hik_rtsp_port, rtsp_describe,
+                                                    stream_url, test_camera)
 
-                    found, last_err = None, ""
+                    ip, found, problem, log = dip.strip(), None, "", []
                     with st.status("Connecting to channel 1…", expanded=True) as box:
                         st.write("Checking the user name and password with the DVR's web login…")
-                        login, info = check_login(dbrand, dip.strip(), duser, dpass)
+                        login, info = check_login(dbrand, ip, duser, dpass)
+                        port = int(dport)
                         if login is False:
-                            last_err = info
-                            st.write(f"The DVR says: {info}.")
+                            problem = f"the DVR's web login says: {info}."
                         else:
-                            port = int(dport)
                             if login:
                                 st.write(f"Login is correct{' (' + info + ')' if info else ''}.")
-                                set_port = hik_rtsp_port(dip.strip(), duser, dpass) if dbrand.startswith("Hik") else None
+                                set_port = hik_rtsp_port(ip, duser, dpass) if dbrand.startswith("Hik") else None
                                 if set_port and set_port != port:
                                     st.write(f"The DVR's RTSP port is {set_port}, using that.")
                                     port = set_port
-                            for forms in dvr_urls(dbrand, dip.strip(), port, duser, dpass):
-                                for label, make in forms:
-                                    st.write(f"Trying {label}…")
-                                    ok, msg, jpg = test_camera(make(1), timeout=10)
-                                    if ok:
-                                        found = (label, make, jpg)
-                                        break
-                                    last_err = msg
-                                    st.caption(explain_error(msg))
-                                    if refused_login(msg):
-                                        break  # same login on every path: do not lock the DVR with retries
-                                if found:
+                            for label, path in dvr_paths(dbrand):
+                                code, note = rtsp_describe(ip, port, path(1), duser, dpass)
+                                log.append(f"{label} ({path(1)}): {code or 'no answer'} {note}".strip())
+                                st.write(f"{label}: " + {200: "found", 401: "login refused", 404: "not on this DVR"}
+                                         .get(code, f"no answer ({note})" if code is None else f"answer {code}"))
+                                if code == 200:
+                                    found = (label, path)
                                     break
+                                if code is None:
+                                    problem = (f"no answer on port {port}: check the IP address, that this PC is on "
+                                               "the same network, and the RTSP port in the DVR's network settings.")
+                                    break
+                                if code == 401:
+                                    problem = (note or "the DVR refuses this user name and password for video") + (
+                                        ". The web login works, so check that this user may watch live video "
+                                        "(User Management > Live View permission)." if login else ".")
+                                    break  # same login on every path: do not lock the DVR with retries
+                            if not found and not problem:
+                                problem = "the DVR did not accept any of the usual stream addresses."
                         box.update(label="Connected" if found else "Could not connect",
                                    state="complete" if found else "error")
-                    if not found and login and refused_login(last_err):
-                        last_err = ("the login is right for the web page, but the DVR refuses it for video. In "
-                                    "the DVR's web page open Configuration > System > Security > Authentication "
-                                    "and set RTSP Authentication to 'digest/basic', and check that this user "
-                                    "may watch live video (User Management > Permissions > Live View).")
                     if not found:
-                        st.error(f"Could not connect to channel 1: {explain_error(last_err)}")
-                        if last_err:
+                        st.error(f"Could not connect to channel 1: {problem}")
+                        if log:
                             with st.expander("Details (send these if you ask for help)"):
-                                st.code(re.sub(r"(rtsp://[^:/@]+:)[^@]+@", r"\1****@", last_err)[-1500:])
+                                st.code("\n".join(log))
                     else:
-                        label, make, jpg = found
-                        st.image(jpg, caption=f"Channel 1 ({label})", width=480)
+                        label, path = found
+
+                        def make(ch):
+                            return stream_url(ip, port, path(ch), duser, dpass)
+
+                        with st.spinner("Getting a picture from channel 1…"):
+                            ok, msg, jpg = test_camera(make(1), timeout=30)
+                        st.session_state["dvr_pic"] = jpg if ok else None
                         have = {c["name"] for c in store.cameras()}
                         added = 0
                         for ch in range(1, int(dch) + 1):

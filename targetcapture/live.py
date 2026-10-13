@@ -76,6 +76,19 @@ def _creds(user: str, password: str) -> list[str]:
     return [light] if light == full else [light, full]
 
 
+def dvr_paths(make: str) -> list[tuple[str, object]]:
+    """Stream paths to try for a DVR / NVR, most likely first: [(label, channel -> path)]."""
+    hik = [("Hikvision main stream", lambda ch: f"/Streaming/Channels/{ch}01"),
+           ("Hikvision IP-camera channels (from 33)", lambda ch: f"/Streaming/Channels/{ch + 32}01"),
+           ("Hikvision older form", lambda ch: f"/h264/ch{ch}/main/av_stream")]
+    dahua = [("Dahua main stream", lambda ch: f"/cam/realmonitor?channel={ch}&subtype=0")]
+    return hik + dahua if make.lower().startswith("hik") else dahua + hik
+
+
+def stream_url(ip: str, port: int, path: str, user: str, password: str) -> str:
+    return f"rtsp://{_creds(user, password)[0]}@{ip}:{port}{path}"
+
+
 def dvr_urls(make: str, ip: str, port: int, user: str, password: str) -> list[tuple[str, object]]:
     """Stream addresses to try for a DVR / NVR, most likely first: [(label, channel -> url)].
     The chosen make's forms come first, then the other make's (some DVRs are rebranded)."""
@@ -135,6 +148,55 @@ def explain_error(msg: str) -> str:
         return ("no answer: check the IP address, that this PC is on the same network, and that RTSP is "
                 "allowed in the DVR's network settings.")
     return "could not read the stream."
+
+
+def rtsp_describe(ip: str, port: int, path: str, user: str, password: str, timeout: float = 6) -> tuple[int | None, str]:
+    """Ask the DVR for one stream address without reading any video (RTSP DESCRIBE, with the
+    login it asks for). Returns (status, note): 200 the address and login are right, 401 login
+    refused, 404 no such address; None when the DVR does not answer."""
+    import base64
+    import hashlib
+    import socket
+
+    url = f"rtsp://{ip}:{port}{path}"
+
+    def ask(sock, cseq, auth=None):
+        req = f"DESCRIBE {url} RTSP/1.0\r\nCSeq: {cseq}\r\nAccept: application/sdp\r\nUser-Agent: TargetCapture\r\n"
+        if auth:
+            req += f"Authorization: {auth}\r\n"
+        sock.sendall((req + "\r\n").encode())
+        data = b""
+        while b"\r\n\r\n" not in data:
+            chunk = sock.recv(4096)
+            if not chunk:
+                break
+            data += chunk
+        head = data.split(b"\r\n\r\n")[0].decode(errors="replace")
+        m = re.match(r"RTSP/1\.0 (\d+)", head)
+        return (int(m.group(1)) if m else None), head
+
+    try:
+        with socket.create_connection((ip, port), timeout=timeout) as sock:
+            sock.settimeout(timeout)
+            code, head = ask(sock, 1)
+            if code != 401:
+                return code, ""
+            auths = re.findall(r"WWW-Authenticate:\s*(.+)", head, re.I)
+            digest = next((a for a in auths if a.lower().startswith("digest")), None)
+            if digest:
+                f = dict(re.findall(r'(\w+)="?([^",]*)"?', digest))
+                h = lambda x: hashlib.md5(x.encode()).hexdigest()  # noqa: E731
+                ha1, ha2 = h(f"{user}:{f.get('realm', '')}:{password}"), h(f"DESCRIBE:{url}")
+                resp = h(f"{ha1}:{f.get('nonce', '')}:{ha2}")
+                auth = (f'Digest username="{user}", realm="{f.get("realm", "")}", nonce="{f.get("nonce", "")}", '
+                        f'uri="{url}", response="{resp}"')
+            else:
+                auth = "Basic " + base64.b64encode(f"{user}:{password}".encode()).decode()
+            code, head = ask(sock, 2, auth)
+            locked = "lock" in head.lower()
+            return code, ("user locked by the DVR after wrong passwords" if locked else "")
+    except OSError as e:
+        return None, str(e)
 
 
 def hik_rtsp_port(ip: str, user: str, password: str) -> int | None:

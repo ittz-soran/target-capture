@@ -41,27 +41,57 @@ def ffmpeg_exe() -> str | None:
         return None
 
 
-def _input_args(url: str) -> list[str]:
+def _input_args(url: str, transport: str = "tcp") -> list[str]:
     if os.path.isfile(url):  # a video file played as if it were a camera (for trying things out)
         return ["-re", "-stream_loop", "-1", "-i", url]
-    args = ["-rtsp_transport", "tcp"] if url.lower().startswith("rtsp") else []
+    args = ["-rtsp_transport", transport] if url.lower().startswith("rtsp") else []
     return [*args, "-i", url]
 
 
-def test_camera(url: str, timeout: float = 15) -> tuple[bool, str, bytes | None]:
+# ffmpeg lines that only say a picture could not be decoded yet (they repeat many times a second)
+_DECODE_NOISE = re.compile(r"PPS id|VPS|SPS|does not exist|decode_slice|Error constructing the frame|"
+                           r"Could not find ref|missing picture|no frame!|concealing|error while decoding", re.I)
+
+
+def _ffmpeg_reason(stderr: bytes | None) -> str:
+    """The useful part of ffmpeg's messages, one short line."""
+    lines = [ln.strip() for ln in (stderr or b"").decode(errors="replace").splitlines() if ln.strip()]
+    useful = [ln for ln in lines if not _DECODE_NOISE.search(ln)]
+    noise = [ln for ln in lines if _DECODE_NOISE.search(ln)]
+    text = re.sub(r"rtsp://[^@\s]*@", "rtsp://", " | ".join(useful[-3:]))  # no passwords on screen
+    if noise:
+        text = (text + " | " if text else "") + f"{len(noise)} lines of 'picture could not be decoded' (e.g. {noise[-1][:80]})"
+    return text[-400:]
+
+
+def test_camera(url: str, timeout: float = 15, transport: str = "tcp") -> tuple[bool, str, bytes | None]:
     """Grab one picture from the camera: (ok, message, jpeg)."""
     exe = ffmpeg_exe()
     if not exe:
         return False, "ffmpeg is not available (pip install imageio-ffmpeg)", None
-    cmd = [exe, "-nostdin", "-loglevel", "error", *_input_args(url), "-frames:v", "1", "-f", "image2pipe",
-           "-vcodec", "mjpeg", "-"]
+    cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "warning", *_input_args(url, transport),
+           "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        return False, "no answer from the camera (check the address, user name and password)", None
+        r = subprocess.run(cmd, capture_output=True, timeout=timeout, creationflags=flags)
+    except subprocess.TimeoutExpired as e:
+        why = _ffmpeg_reason(e.stderr)
+        return False, f"no picture within {timeout:g} s" + (f" (ffmpeg: {why})" if why else
+                                                           " (connected, but no video came)"), None
     if r.returncode or not r.stdout:
-        return False, (r.stderr.decode(errors="replace").strip()[-300:] or "could not read the stream"), None
+        return False, _ffmpeg_reason(r.stderr) or "could not read the stream", None
     return True, "connected", r.stdout
+
+
+def sub_stream(path: str) -> str:
+    """The smaller second stream of the same channel (lighter, and often H.264 when the main
+    stream is H.265), or the same path when there is none."""
+    m = re.search(r"/Streaming/Channels/(\d+)01$", path)
+    if m:
+        return path[:m.start()] + f"/Streaming/Channels/{m.group(1)}02"
+    if "/main/av_stream" in path:
+        return path.replace("/main/av_stream", "/sub/av_stream")
+    return path.replace("subtype=0", "subtype=1")
 
 
 def _creds(user: str, password: str) -> list[str]:
@@ -285,6 +315,7 @@ class StreamReader(threading.Thread):
         self.status = "connecting"
         self.proc: subprocess.Popen | None = None
         self.err: list[str] = []
+        self.transport = "tcp"  # switches to udp (and back) when a DVR sends nothing over tcp
 
     def take(self):
         """The newest picture not taken yet, or None."""
@@ -300,7 +331,7 @@ class StreamReader(threading.Thread):
             cmd += ["-re", "-stream_loop", "-1", "-i", self.url]
         else:
             if self.url.lower().startswith("rtsp"):
-                cmd += ["-rtsp_transport", "tcp", "-timeout", "10000000"]
+                cmd += ["-rtsp_transport", self.transport, "-timeout", "10000000"]
             cmd += ["-fflags", "+discardcorrupt+nobuffer", "-flags", "low_delay", "-i", self.url]
         return cmd + ["-map", "0:v:0", "-an", "-vf", f"fps={self.fps:g}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"]
 
@@ -330,18 +361,35 @@ class StreamReader(threading.Thread):
             t0 = time.time()
             while not size and proc.poll() is None and time.time() - t0 < 30 and not self.stop_ev.is_set():
                 time.sleep(0.05)
+            got = False
             if size:
-                self.status = "live"
+                self.status = "connected, waiting for the first picture"
                 w, h = size
                 n = w * h * 3
+                last = [time.time()]
+
+                def watchdog():  # connected but no pictures come (e.g. undecodable H.265): start again
+                    while proc.poll() is None and not self.stop_ev.is_set():
+                        if time.time() - last[0] > 30:
+                            self.err = (self.err + ["no picture for 30 seconds"])[-5:]
+                            proc.kill()
+                            return
+                        time.sleep(1)
+
+                threading.Thread(target=watchdog, daemon=True).start()
                 while not self.stop_ev.is_set():
                     buf = _read_exact(proc.stdout, n)
                     if buf is None:
                         break
+                    last[0] = time.time()
+                    if not got:
+                        got, self.status = True, "live"
                     img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
                     with self.lock:
                         self.latest = (img, time.time())
             self._kill(proc)
+            if not got and self.url.lower().startswith("rtsp"):
+                self.transport = "udp" if self.transport == "tcp" else "tcp"
             if not self.stop_ev.is_set():
                 why = explain_error(" ".join(self.err)) if self.err else "no picture"
                 self.status = f"not connected: {why} Trying again…"

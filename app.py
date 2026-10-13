@@ -581,12 +581,19 @@ with tab_cams:
         if "dvr_msg" in st.session_state:
             st.success(st.session_state.pop("dvr_msg"))
             pic = st.session_state.pop("dvr_pic", None)
+            how = st.session_state.pop("dvr_how", "")
+            notes = st.session_state.pop("dvr_notes", [])
             if pic:
-                st.image(pic, caption="Channel 1", width=480)
+                st.image(pic, caption=f"Channel 1 ({how})", width=480)
+                if how != "main stream":
+                    st.info(f"The main stream sent no picture, so the channels use the {how}.")
             else:
-                st.warning("The address and login are right, but no picture arrived from channel 1 within 30 "
-                           "seconds (some DVRs send a full picture only every few seconds, or the channel has no "
-                           "camera). The live view shows it once pictures arrive.")
+                st.warning("The address and login are right, but channel 1 sent no picture (main stream, sub "
+                           "stream and UDP were tried). Check that a camera is connected to channel 1, and in the "
+                           "DVR's Video settings set the video type to H.264 instead of H.265 / H.265+.")
+            if notes:
+                with st.expander("Details (send these if you ask for help)"):
+                    st.code("\n".join(notes))
         with st.form("add_dvr"):
             d1, d2, d3 = st.columns(3)
             dname = d1.text_input("Name", "DVR")
@@ -605,7 +612,7 @@ with tab_cams:
                     st.error("Type the DVR's IP address and password.")
                 else:
                     from targetcapture.live import (check_login, dvr_paths, hik_rtsp_port, rtsp_describe,
-                                                    stream_url, test_camera)
+                                                    stream_url, sub_stream, test_camera)
 
                     ip, found, problem, log = dip.strip(), None, "", []
                     with st.status("Connecting to channel 1…", expanded=True) as box:
@@ -650,12 +657,28 @@ with tab_cams:
                     else:
                         label, path = found
 
+                        tries = [("main stream", path, "tcp", 20), ("sub stream", lambda ch: sub_stream(path(ch)), "tcp", 15),
+                                 ("main stream over UDP", path, "udp", 15)]
+                        ok, jpg, notes = False, None, []
+                        with st.status("Getting a picture from channel 1…", expanded=True) as box:
+                            for how, p, transport, secs in tries:
+                                if how == "sub stream" and p(1) == path(1):
+                                    continue
+                                st.write(f"Trying the {how} (up to {secs} s)…")
+                                ok, msg, jpg = test_camera(stream_url(ip, port, p(1), duser, dpass), secs, transport)
+                                notes.append(f"{how} ({p(1)}): {msg}")
+                                if ok:
+                                    path = p
+                                    break
+                            box.update(label="Got a picture" if ok else "No picture from channel 1",
+                                       state="complete" if ok else "error")
+
                         def make(ch):
                             return stream_url(ip, port, path(ch), duser, dpass)
 
-                        with st.spinner("Getting a picture from channel 1…"):
-                            ok, msg, jpg = test_camera(make(1), timeout=30)
                         st.session_state["dvr_pic"] = jpg if ok else None
+                        st.session_state["dvr_notes"] = log + notes
+                        st.session_state["dvr_how"] = how if ok else ""
                         have = {c["name"] for c in store.cameras()}
                         added = 0
                         for ch in range(1, int(dch) + 1):

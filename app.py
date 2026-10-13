@@ -545,50 +545,61 @@ with tab_cams:
             if add and ok and cn:
                 store.add_camera(cn, cu, cp, cpp)
                 st.success(f"Added {cn}.")
-    with st.expander("Add a whole DVR / NVR (all its channels at once)"):
+                st.rerun()
+            elif add and not cn:
+                st.error("Give the camera a name.")
+
+    with st.expander("Add a whole DVR / NVR (all its channels at once)",
+                     expanded="dvr_msg" in st.session_state):
+        if "dvr_msg" in st.session_state:
+            st.success(st.session_state.pop("dvr_msg"))
         with st.form("add_dvr"):
             d1, d2, d3 = st.columns(3)
             dname = d1.text_input("Name", "DVR")
             dip = d2.text_input("IP address", placeholder="192.168.1.100")
             dbrand = d3.selectbox("Make", ["Hikvision / HiLook", "Dahua / Imou"])
-            d4, d5, d6 = st.columns(3)
+            d4, d5, d6, d7 = st.columns(4)
             duser = d4.text_input("User name", "admin")
             dpass = d5.text_input("Password", type="password")
-            dch = d6.number_input("Number of channels", 1, 64, 4)
+            dport = d6.number_input("RTSP port", 1, 65535, 554, help="554 unless it was changed in the DVR's network settings")
+            dch = d7.number_input("Number of channels", 1, 64, 4)
             k1, k2 = st.columns(2)
             dp = k1.checkbox("Read plates", True, key="dvr_p")
             dpp = k2.checkbox("Find people", True, key="dvr_pp")
-            if st.form_submit_button("Test channel 1 and add all channels", type="primary") and dip and dpass:
-                from urllib.parse import quote
-
-                from targetcapture.live import test_camera
-
-                auth = f"{quote(duser, safe='')}:{quote(dpass, safe='')}"
-
-                def url(ch):
-                    if dbrand.startswith("Hik"):
-                        return f"rtsp://{auth}@{dip.strip()}:554/Streaming/Channels/{ch}01"
-                    return f"rtsp://{auth}@{dip.strip()}:554/cam/realmonitor?channel={ch}&subtype=0"
-
-                with st.spinner("Connecting to channel 1…"):
-                    ok, msg, jpg = test_camera(url(1))
-                if not ok:
-                    st.error(f"Could not connect: {msg}")
+            if st.form_submit_button("Test channel 1 and add all channels", type="primary"):
+                if not dip.strip() or not dpass:
+                    st.error("Type the DVR's IP address and password.")
                 else:
-                    st.image(jpg, caption="Channel 1", width=480)
-                    have = {c["name"] for c in store.cameras()}
-                    added = 0
-                    for ch in range(1, int(dch) + 1):
-                        name = f"{dname} ch{ch}"
-                        if name not in have:
-                            store.add_camera(name, url(ch), dp, dpp)
-                            added += 1
-                    st.success(f"Added {added} channel(s). Switch off any channel you do not need; each one "
-                               "uses part of the graphics card.")
+                    from targetcapture.live import dvr_urls, explain_error, test_camera
 
-                st.rerun()
-            elif add and not cn:
-                st.error("Give the camera a name.")
+                    tries = dvr_urls(dbrand, dip.strip(), int(dport), duser, dpass)
+                    found, last_err = None, ""
+                    with st.status("Connecting to channel 1…", expanded=True) as box:
+                        for label, make in tries:
+                            st.write(f"Trying {label}…")
+                            ok, msg, jpg = test_camera(make(1), timeout=10)
+                            if ok:
+                                found = (label, make, jpg)
+                                break
+                            last_err = msg
+                        box.update(label="Connected" if found else "Could not connect",
+                                   state="complete" if found else "error")
+                    if not found:
+                        st.error(f"Could not connect to channel 1: {explain_error(last_err)}")
+                    else:
+                        label, make, jpg = found
+                        st.image(jpg, caption=f"Channel 1 ({label})", width=480)
+                        have = {c["name"] for c in store.cameras()}
+                        added = 0
+                        for ch in range(1, int(dch) + 1):
+                            name = f"{dname} ch{ch}"
+                            if name not in have:
+                                store.add_camera(name, make(ch), dp, dpp)
+                                added += 1
+                        st.session_state["dvr_msg"] = (
+                            f"Added {added} channel(s) of {dname}. Switch off any channel you do not need; each "
+                            "one uses part of the graphics card. Then click Start live monitoring.")
+                        st.rerun()
 
 with tab_faces:
     st.caption("Every face found in the indexed videos, grouped into people. Click a person to see "

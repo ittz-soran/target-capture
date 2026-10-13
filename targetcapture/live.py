@@ -65,6 +65,34 @@ def test_camera(url: str, timeout: float = 15) -> tuple[bool, str, bytes | None]
     return True, "connected", r.stdout
 
 
+def dvr_urls(make: str, ip: str, port: int, user: str, password: str) -> list[tuple[str, object]]:
+    """Stream addresses to try for a DVR / NVR, most likely first: [(label, channel -> url)].
+    The chosen make's forms come first, then the other make's (some DVRs are rebranded)."""
+    from urllib.parse import quote
+
+    base = f"rtsp://{quote(user, safe='')}:{quote(password, safe='')}@{ip}:{port}"
+    hik = [("Hikvision main stream", lambda ch: f"{base}/Streaming/Channels/{ch}01"),
+           ("Hikvision IP-camera channels (from 33)", lambda ch: f"{base}/Streaming/Channels/{ch + 32}01"),
+           ("Hikvision older form", lambda ch: f"{base}/h264/ch{ch}/main/av_stream")]
+    dahua = [("Dahua main stream", lambda ch: f"{base}/cam/realmonitor?channel={ch}&subtype=0")]
+    return hik + dahua if make.lower().startswith("hik") else dahua + hik
+
+
+def explain_error(msg: str) -> str:
+    """ffmpeg's message in plain words."""
+    m = (msg or "").lower()
+    if "401" in m or "unauthorized" in m:
+        return "wrong user name or password (or that user may not watch live video)."
+    if "404" in m or "not found" in m:
+        return "the DVR has no such channel at this address."
+    if "refused" in m:
+        return "the DVR refused the connection: check the RTSP port (Network settings of the DVR, normally 554)."
+    if "no answer" in m or "timed out" in m or "timeout" in m or "unreachable" in m:
+        return ("no answer: check the IP address, that this PC is on the same network, and that RTSP is "
+                "allowed in the DVR's network settings.")
+    return msg or "could not read the stream."
+
+
 def _slug(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_") or "camera"
 

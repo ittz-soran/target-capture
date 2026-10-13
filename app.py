@@ -570,20 +570,37 @@ with tab_cams:
                 if not dip.strip() or not dpass:
                     st.error("Type the DVR's IP address and password.")
                 else:
-                    from targetcapture.live import dvr_urls, explain_error, test_camera
+                    from targetcapture.live import check_login, dvr_urls, explain_error, test_camera
 
-                    tries = dvr_urls(dbrand, dip.strip(), int(dport), duser, dpass)
                     found, last_err = None, ""
                     with st.status("Connecting to channel 1…", expanded=True) as box:
-                        for label, make in tries:
-                            st.write(f"Trying {label}…")
-                            ok, msg, jpg = test_camera(make(1), timeout=10)
-                            if ok:
-                                found = (label, make, jpg)
-                                break
-                            last_err = msg
+                        st.write("Checking the user name and password with the DVR's web login…")
+                        login, info = check_login(dbrand, dip.strip(), duser, dpass)
+                        if login is False:
+                            last_err = info
+                            st.write(f"The DVR says: {info}.")
+                        else:
+                            if login:
+                                st.write(f"Login is correct{' (' + info + ')' if info else ''}.")
+                            for forms in dvr_urls(dbrand, dip.strip(), int(dport), duser, dpass):
+                                for label, make in forms:
+                                    st.write(f"Trying {label}…")
+                                    ok, msg, jpg = test_camera(make(1), timeout=10)
+                                    if ok:
+                                        found = (label, make, jpg)
+                                        break
+                                    last_err = msg
+                                    if "401" in msg or "nauthorized" in msg:
+                                        break  # same login on every path: do not lock the DVR with retries
+                                if found:
+                                    break
                         box.update(label="Connected" if found else "Could not connect",
                                    state="complete" if found else "error")
+                    if not found and login and ("401" in last_err or "nauthorized" in last_err):
+                        last_err = ("the login is right for the web page, but the DVR refuses it for video. In "
+                                    "the DVR's web page open Configuration > System > Security > Authentication "
+                                    "and set RTSP Authentication to 'digest/basic', and check that this user "
+                                    "may watch live video (User Management > Permissions > Live View).")
                     if not found:
                         st.error(f"Could not connect to channel 1: {explain_error(last_err)}")
                     else:

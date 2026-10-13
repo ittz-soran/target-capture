@@ -65,17 +65,55 @@ def test_camera(url: str, timeout: float = 15) -> tuple[bool, str, bytes | None]
     return True, "connected", r.stdout
 
 
+def _creds(user: str, password: str) -> list[str]:
+    """user:password as it goes into a stream address. Only the characters that would break
+    the address are encoded first (many DVRs and ffmpeg builds do not decode the rest, e.g. a
+    password with "!" sent as "%21" is refused); then everything encoded."""
+    from urllib.parse import quote
+
+    light = f"{quote(user, safe='!$&()*+,;=~')}:{quote(password, safe='!$&()*+,;=~')}"
+    full = f"{quote(user, safe='')}:{quote(password, safe='')}"
+    return [light] if light == full else [light, full]
+
+
 def dvr_urls(make: str, ip: str, port: int, user: str, password: str) -> list[tuple[str, object]]:
     """Stream addresses to try for a DVR / NVR, most likely first: [(label, channel -> url)].
     The chosen make's forms come first, then the other make's (some DVRs are rebranded)."""
-    from urllib.parse import quote
+    out = []
+    for i, cred in enumerate(_creds(user, password)):
+        base = f"rtsp://{cred}@{ip}:{port}"
+        note = "" if i == 0 else ", password written another way"
+        hik = [(f"Hikvision main stream{note}", lambda ch, b=base: f"{b}/Streaming/Channels/{ch}01"),
+               (f"Hikvision IP-camera channels (from 33){note}", lambda ch, b=base: f"{b}/Streaming/Channels/{ch + 32}01"),
+               (f"Hikvision older form{note}", lambda ch, b=base: f"{b}/h264/ch{ch}/main/av_stream")]
+        dahua = [(f"Dahua main stream{note}", lambda ch, b=base: f"{b}/cam/realmonitor?channel={ch}&subtype=0")]
+        out.append(hik + dahua if make.lower().startswith("hik") else dahua + hik)
+    return out
 
-    base = f"rtsp://{quote(user, safe='')}:{quote(password, safe='')}@{ip}:{port}"
-    hik = [("Hikvision main stream", lambda ch: f"{base}/Streaming/Channels/{ch}01"),
-           ("Hikvision IP-camera channels (from 33)", lambda ch: f"{base}/Streaming/Channels/{ch + 32}01"),
-           ("Hikvision older form", lambda ch: f"{base}/h264/ch{ch}/main/av_stream")]
-    dahua = [("Dahua main stream", lambda ch: f"{base}/cam/realmonitor?channel={ch}&subtype=0")]
-    return hik + dahua if make.lower().startswith("hik") else dahua + hik
+
+def check_login(make: str, ip: str, user: str, password: str) -> tuple[bool | None, str]:
+    """Ask the DVR's own web login whether the user name and password are right (the same check
+    as logging in to its web page). (True, model) / (False, reason) / (None, '') if it cannot tell."""
+    import requests
+    from requests.auth import HTTPDigestAuth
+
+    paths = (["/ISAPI/System/deviceInfo"] if make.lower().startswith("hik")
+             else ["/cgi-bin/magicBox.cgi?action=getDeviceType"])
+    for path in paths:
+        try:
+            r = requests.get(f"http://{ip}{path}", auth=HTTPDigestAuth(user, password), timeout=6)
+        except requests.RequestException:
+            return None, ""
+        if r.status_code == 200:
+            import re as _re
+
+            m = _re.search(r"<model>([^<]+)</model>|type=(\S+)", r.text)
+            return True, (m.group(1) or m.group(2)) if m else ""
+        if r.status_code == 401:
+            locked = "lock" in r.text.lower()
+            return False, ("the DVR has locked this user for a while after wrong passwords; wait 30 minutes "
+                           "or restart the DVR" if locked else "wrong user name or password")
+    return None, ""
 
 
 def explain_error(msg: str) -> str:

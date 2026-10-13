@@ -115,6 +115,10 @@ class Store:
             self.db.execute("ALTER TABLE media ADD COLUMN decoder TEXT")
         if "crop" not in {r["name"] for r in self.db.execute("PRAGMA table_info(plate_labels)")}:
             self.db.execute("ALTER TABLE plate_labels ADD COLUMN crop BLOB")  # PNG of the taught plate
+        if "face_jpg" not in {r["name"] for r in self.db.execute("PRAGMA table_info(person_dets)")}:
+            # small picture of the face, kept while indexing (a person's best faces so far), so
+            # the face galleries do not need to find the frame in the video again
+            self.db.execute("ALTER TABLE person_dets ADD COLUMN face_jpg BLOB")
 
     # ---- media -------------------------------------------------------------
     def upsert_media(self, info, clock_start: str | None) -> int:
@@ -362,14 +366,14 @@ class Store:
             r = {"media_id": media_id, **r}
             emb = r.get("emb")
             r["emb"] = None if emb is None else np.asarray(emb, np.float32).tobytes()
-            for k in ("fx1", "fy1", "fx2", "fy2", "face_score"):
+            for k in ("fx1", "fy1", "fx2", "fy2", "face_score", "face_jpg"):
                 r.setdefault(k, None)
             out.append(r)
         self.db.executemany(
             """INSERT INTO person_dets(media_id, frame, t, track_id, x1, y1, x2, y2,
-               fx1, fy1, fx2, fy2, face_score, emb, upper_color, lower_color)
+               fx1, fy1, fx2, fy2, face_score, emb, upper_color, lower_color, face_jpg)
                VALUES (:media_id, :frame, :t, :track_id, :x1, :y1, :x2, :y2,
-               :fx1, :fy1, :fx2, :fy2, :face_score, :emb, :upper_color, :lower_color)""",
+               :fx1, :fy1, :fx2, :fy2, :face_score, :emb, :upper_color, :lower_color, :face_jpg)""",
             out,
         )
 

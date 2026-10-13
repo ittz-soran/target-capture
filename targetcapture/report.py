@@ -225,6 +225,12 @@ def thumbnail(row, store, cache_dir, box=("x1", "y1", "x2", "y2"), pad=0.15, min
     path = os.path.join(cache_dir, name)
     if os.path.exists(path):
         return path
+    kept = row["face_jpg"] if not full and box[0] == "fx1" and "face_jpg" in row.keys() else None
+    if kept:  # face picture kept while indexing
+        os.makedirs(cache_dir, exist_ok=True)
+        with open(path, "wb") as f:
+            f.write(kept)
+        return path
     frame = store.frame(row)
     if frame is None:
         return None

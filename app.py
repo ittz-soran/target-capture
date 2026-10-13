@@ -697,10 +697,10 @@ with tab_faces:
     c1, c2 = st.columns(2)
     f_thr = c1.slider("How alike faces must be to count as the same person", 0.35, 0.65, 0.45, 0.01,
                       help="Lower merges more (risk: two people become one). Higher splits more.")
-    hide_oneoff = c2.checkbox("Hide people only caught in single frames (small or side-on faces)", True)
+    hide_oneoff = c2.checkbox("Hide people with only one face picture (often small or side-on faces)", True)
     db_mtime = os.path.getmtime(db_path) if os.path.exists(db_path) else 0
-    people = [p for p in cached_identities(db_path, db_mtime, f_thr)
-              if not hide_oneoff or p["max_track_faces"] >= 3]
+    everyone = cached_identities(db_path, db_mtime, f_thr)
+    people = [p for p in everyone if not hide_oneoff or p["n_faces"] >= 2]
     sel = st.session_state.get("face_sel")
     if sel is not None:
         person = next((p for p in people if p["id"] == sel), None)
@@ -720,6 +720,9 @@ with tab_faces:
             show_rows(rows, out, ["face_image"])
             st.divider()
     st.subheader(f"{len(people)} people")
+    if len(everyone) > len(people):
+        st.caption(f"{len(everyone) - len(people)} more seen in only one face picture: untick 'Hide people "
+                   "with only one face picture' to see them.")
     cols = st.columns(6)
     for i, p in enumerate(people[pager(len(people), "face_page")]):
         b = p["best"]

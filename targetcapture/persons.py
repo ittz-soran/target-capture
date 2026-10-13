@@ -42,13 +42,17 @@ class FaceModel:
         self.det = self.app.det_model
         self.rec = self.app.models["recognition"]
 
-    def faces(self, img, input_size=None):
-        """Detect faces and embed them. Returns list of (bbox[4], score, emb[512])."""
+    def faces(self, img, input_size=None, min_score: float = 0.0, best_only: bool = False):
+        """Detect faces and embed them. Returns list of (bbox[4], score, emb[512]).
+        best_only: embed only the surest face (embedding is half the work per face)."""
         from insightface.app.common import Face
 
         bboxes, kpss = self.det.detect(img, input_size=input_size, max_num=0)
+        keep = [i for i in range(bboxes.shape[0]) if bboxes[i, 4] >= min_score]
+        if best_only and keep:
+            keep = [max(keep, key=lambda i: bboxes[i, 4])]
         out = []
-        for i in range(bboxes.shape[0]):
+        for i in keep:
             face = Face(bbox=bboxes[i, :4], kps=kpss[i], det_score=float(bboxes[i, 4]))
             emb = self.rec.get(img, face)
             out.append((bboxes[i, :4], float(bboxes[i, 4]), emb / np.linalg.norm(emb)))
@@ -85,6 +89,7 @@ class PersonIndexer:
         self._untracked = -1
         self._face_try: dict[int, tuple] = {}
         self._faces_seen: dict[int, int] = {}
+        self._best_face: dict[int, float] = {}
         self.timing: dict[str, float] = {}  # seconds spent per step (shown after indexing)
 
     def start(self, track_offset: int = 0):
@@ -94,19 +99,19 @@ class PersonIndexer:
         self.yolo = YOLO(self.person_model)
         self.track_offset = track_offset
         self._untracked = -1
-        self._face_try, self._faces_seen = {}, {}
+        self._face_try, self._faces_seen, self._best_face = {}, {}, {}
         self.timing = {}
         self._bt = _byte_tracker(self.tracker)
 
     def _face_due(self, tid: int, t: float, h: int) -> bool:
         """Look for a face on this person now? Every frame for their first 3 faces, then about
-        every 0.6 s, or sooner when they come clearly closer: the same face frame after frame
+        once a second, or sooner when they come clearly closer: the same face frame after frame
         adds little, and face detection is the slowest step of person indexing."""
         if tid < 0 or self._faces_seen.get(tid, 0) < 3:
             self._face_try[tid] = (t, h)
             return True
         last_t, last_h = self._face_try.get(tid, (-1e9, 0))
-        if t - last_t >= 0.6 or h >= 1.25 * last_h:
+        if t - last_t >= 1.0 or h >= 1.25 * last_h:
             self._face_try[tid] = (t, h)
             return True
         return False
@@ -127,7 +132,7 @@ class PersonIndexer:
         if min(region.shape[:2]) < 160:  # upscale small heads so the detector sees them
             scale = 160 / min(region.shape[:2])
             region = cv2.resize(region, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
-        faces = [f for f in self.face.faces(region, input_size=(320, 320)) if f[1] >= self.min_face_score]
+        faces = self.face.faces(region, input_size=(320, 320), min_score=self.min_face_score, best_only=True)
         if not faces:
             return None
         bb, score, emb = max(faces, key=lambda f: f[1])
@@ -174,8 +179,28 @@ class PersonIndexer:
                 self._faces_seen[tid] = self._faces_seen.get(tid, 0) + 1
                 fb, score, emb = f
                 row.update(fx1=fb[0], fy1=fb[1], fx2=fb[2], fy2=fb[3], face_score=score, emb=emb)
+                quality = (fb[2] - fb[0]) * score
+                # the clearest face of this person so far, and their first few (if the tracker
+                # mixed two people up, each of them still has a picture)
+                if quality > self._best_face.get(tid, 0.0) or self._faces_seen[tid] <= 3:
+                    self._best_face[tid] = max(quality, self._best_face.get(tid, 0.0))
+                    row["face_jpg"] = face_picture(img, fb)
             rows.append(row)
         return rows
+
+
+def face_picture(img, fb, pad: float = 0.35, width: int = 160) -> bytes | None:
+    """A small JPEG of one face (kept in the index, for the galleries)."""
+    x1, y1, x2, y2 = fb
+    w, h = x2 - x1, y2 - y1
+    px, py = int(w * pad), int(h * pad)
+    crop = img[max(0, y1 - py):min(img.shape[0], y2 + py), max(0, x1 - px):min(img.shape[1], x2 + px)]
+    if crop.size == 0:
+        return None
+    crop = cv2.resize(crop, (width, max(1, int(crop.shape[0] * width / crop.shape[1]))),
+                      interpolation=cv2.INTER_CUBIC if crop.shape[1] < width else cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", crop, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    return buf.tobytes() if ok else None
 
 
 def _byte_tracker(cfg_name: str):
@@ -310,6 +335,8 @@ def identities(store, threshold: float = 0.45, min_face_px: int = 24, min_faces:
             tracks[best_key] = {"sum": np.zeros_like(emb), "n": 0, "best": r, "q": -1, "first": r["t"], "last": r["t"]}
         t = tracks[best_key]
         quality = (r["fx2"] - r["fx1"]) * (r["face_score"] or 0)
+        if "face_jpg" in r.keys() and r["face_jpg"]:  # has its picture kept: no need to open the video
+            quality += 1e6
         t["sum"] = t["sum"] + emb
         t["n"] += 1
         t["last"] = r["t"]

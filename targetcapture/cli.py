@@ -151,6 +151,12 @@ def cmd_live(a):
         stop_file=a.stop_file)
 
 
+def cmd_fetch(a):
+    from .dvr import run_job
+
+    run_job(a.db, a.job)
+
+
 def cmd_media(a):
     store = Store(a.db)
     for m in store.media():
@@ -230,6 +236,10 @@ def main(argv=None):
     s.add_argument("--keep-days", type=float, help="delete recordings older than this (default: Settings tab, 7)")
     s.add_argument("--stop-file", help="stop when this file appears (used by the web page)")
     s.set_defaults(fn=cmd_live)
+
+    s = sub.add_parser("fetch", help="download recordings from a DVR / NVR and index them (job file from the web page)")
+    s.add_argument("job")
+    s.set_defaults(fn=cmd_fetch)
 
     s = sub.add_parser("media", help="list indexed media")
     s.set_defaults(fn=cmd_media)

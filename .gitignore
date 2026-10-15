@@ -17,3 +17,7 @@ runs/
 *.db-shm
 settings.json
 live.log
+dvr_fetch.log
+dvr_jobs/
+dvr_videos/
+kept_frames/

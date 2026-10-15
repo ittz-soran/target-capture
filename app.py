@@ -239,8 +239,8 @@ def live_view():
             c2.markdown(f"Person {r['track_id']}  \n{names[r['media_id']]} · "
                         f"{clock_time(media[r['media_id']], r['t'])[11:]}")
 
-(tab_index, tab_plate, tab_person, tab_car, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
- tab_tips, tab_settings) = st.tabs(["1 · Upload & index", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
+(tab_index, tab_dvr, tab_plate, tab_person, tab_car, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
+ tab_tips, tab_settings) = st.tabs(["1 · Upload & index", "DVR footage", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
                       "Watch list", "Live cameras", "All faces", "All plates", "Teach", "Best results", "Settings"])
 
 with tab_index:
@@ -514,6 +514,123 @@ if not _auto["done"]:
     if CFG["live_autostart"] and store.cameras() and not live_running(store):
         start_live()
         st.toast("Live monitoring started (Settings: start when the page opens).")
+
+
+def dvr_defaults():
+    """DVR address and login from a camera added in the Live cameras tab (so they are typed once)."""
+    from urllib.parse import unquote, urlparse
+
+    for c in store.cameras():
+        u = urlparse(c["url"])
+        if u.scheme == "rtsp" and u.hostname:
+            make = "Dahua / Imou" if "realmonitor" in (u.path + "?" + u.query) else "Hikvision / HiLook"
+            return {"ip": u.hostname, "rtsp_port": u.port or 554, "user": unquote(u.username or "admin"),
+                    "password": unquote(u.password or ""), "make": make, "name": c["name"].rsplit(" ch", 1)[0]}
+    return {"ip": "", "rtsp_port": 554, "user": "admin", "password": "", "make": "Hikvision / HiLook", "name": "DVR"}
+
+
+with tab_dvr:
+    from targetcapture import dvr as D
+
+    st.caption("Pick a DVR / NVR, the channels and a time: the recordings are downloaded piece by piece and "
+               "indexed with your Settings, the next piece downloading while one is indexed. It keeps running "
+               "when this page is closed. Results appear in the search tabs after each piece, with the DVR's "
+               "own clock time.")
+    dd = dvr_defaults()
+    makes = ["Hikvision / HiLook", "Dahua / Imou"]
+    with st.form("dvr_fetch"):
+        a1, a2, a3, a4 = st.columns(4)
+        f_name = a1.text_input("Name", dd["name"])
+        f_ip = a2.text_input("IP address", dd["ip"], placeholder="192.168.1.230")
+        f_make = a3.selectbox("Make", makes, index=makes.index(dd["make"]))
+        f_ch = a4.multiselect("Channels", list(range(1, 65)), [1])
+        b1, b2, b3, b4 = st.columns(4)
+        f_user = b1.text_input("User name", dd["user"])
+        f_pass = b2.text_input("Password", dd["password"], type="password")
+        f_http = b3.number_input("Web port", 1, 65535, 80, help="The port of the DVR's web page (normally 80).")
+        f_rtsp = b4.number_input("RTSP port", 1, 65535, int(dd["rtsp_port"]))
+        today = dt.date.today()
+        c1, c2, c3, c4 = st.columns(4)
+        d_from = c1.date_input("From date", today)
+        t_from = c2.time_input("From time", dt.time(8, 0), step=60)
+        d_to = c3.date_input("To date", today)
+        t_to = c4.time_input("To time", dt.time(9, 0), step=60)
+        e1, e2, e3, e4 = st.columns(4)
+        f_plates = e1.checkbox("Read plates", CFG["read_plates"])
+        f_people = e1.checkbox("Find people", CFG["find_people"])
+        speeds = list(C.SPEED_NAMES)
+        f_speed = e2.radio("Speed", [s_ for s_ in speeds if s_ != "custom"], format_func=C.SPEED_NAMES.get,
+                           index=[s_ for s_ in speeds if s_ != "custom"].index(CFG["speed"])
+                           if CFG["speed"] != "custom" else 0)
+        f_piece = e3.selectbox("Piece length", [5, 10, 15, 30, 60], index=1, format_func=lambda m: f"{m} minutes",
+                               help="Shorter pieces show the first results sooner.")
+        f_method = e3.selectbox("Download by", ["auto", "web", "rtsp"], format_func={
+            "auto": "Fastest that works", "web": "Web download only (fast)",
+            "rtsp": "Playback only (real-time speed)"}.get)
+        f_delete = e4.checkbox("Delete each video after indexing", False,
+                               help="Saves disk space. The pictures of plates and faces are kept, so results "
+                                    "still show; only playing the video is no longer possible.")
+        g1, g2 = st.columns([1, 1])
+        check = g1.form_submit_button("Check what is recorded")
+        go = g2.form_submit_button("Download and index", type="primary")
+    start_t, end_t = dt.datetime.combine(d_from, t_from), dt.datetime.combine(d_to, t_to)
+    if (check or go) and (not f_ip.strip() or not f_pass or not f_ch or end_t <= start_t):
+        st.error("Type the IP address and password, pick at least one channel, and an end after the start.")
+    elif check:
+        with st.spinner("Asking the DVR…"):
+            for ch in f_ch:
+                rec = D.find_recordings(f_make, f_ip.strip(), f_user, f_pass, ch, start_t, end_t, int(f_http))
+                if rec is None:
+                    st.warning(f"Channel {ch}: the DVR did not answer the recording search (web port "
+                               f"{f_http}, user and password). Download and index still tries every piece.")
+                else:
+                    ps = D.pieces(start_t, end_t, 1, rec)
+                    mins = len(ps)
+                    spans = ", ".join(f"{a:%H:%M}–{b:%H:%M}" for a, b in D.pieces(start_t, end_t, 24 * 60, rec)[:12])
+                    (st.success if mins else st.info)(
+                        f"Channel {ch}: {mins} minute(s) recorded" + (f" ({spans})" if spans else "") + ".")
+    elif go:
+        job = {"name": f_name.strip() or "DVR", "make": f_make, "ip": f_ip.strip(), "user": f_user,
+               "password": f_pass, "http_port": int(f_http), "rtsp_port": int(f_rtsp), "channels": f_ch,
+               "start": start_t.isoformat(sep=" "), "end": end_t.isoformat(sep=" "), "piece_minutes": f_piece,
+               "method": f_method, "plates": f_plates, "persons": f_people, "speed": f_speed,
+               "delete_after": f_delete}
+        jp = D.new_job(db_path, job)
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+        subprocess.Popen([sys.executable, "-m", "targetcapture", "--db", db_path, "fetch", jp], creationflags=flags,
+                         cwd=APP_DIR, stdout=open(os.path.join(APP_DIR, "dvr_fetch.log"), "a"),
+                         stderr=subprocess.STDOUT)
+        st.success("Started. Progress shows below.")
+
+    @st.fragment(run_every=3)
+    def dvr_jobs():
+        jobs = D.list_jobs(db_path)
+        if not jobs:
+            return
+        st.subheader("Downloads")
+        for j in jobs[:6]:
+            ps = j.get("pieces", [])
+            done = sum(p["state"] == "done" for p in ps)
+            running = j["state"] in ("running", "finding recordings")
+            stale = running and (dt.datetime.now() - dt.datetime.fromisoformat(j["updated"])).total_seconds() > 600
+            head = (f"**{j['name']}** · channel(s) {', '.join(map(str, j['channels']))} · {j['from'][:16]} to "
+                    f"{j['to'][:16]} · {done} of {len(ps)} pieces indexed · "
+                    + ("stopped unexpectedly" if stale else j["state"]))
+            h1, h2 = st.columns([5, 1])
+            h1.markdown(head)
+            if running and not stale and h2.button("Stop", key=f"stop_{j['id']}"):
+                open(j["_path"].replace(".status.json", ".stop"), "w").close()
+            if ps:
+                h1.progress(done / len(ps))
+            for n in j.get("notes", []):
+                h1.caption(n)
+            with st.expander("Pieces", expanded=running and not stale):
+                st.dataframe([{"channel": p["channel"], "from": p["start"][11:16], "to": p["end"][11:16],
+                               "state": p["state"], "found": ", ".join(f"{v} {k}" for k, v in
+                                                                      p.get("found", {}).items()),
+                               "note": p.get("note", "")} for p in ps], hide_index=True, width="stretch")
+
+    dvr_jobs()
 
 
 with tab_cams:

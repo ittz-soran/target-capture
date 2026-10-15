@@ -195,6 +195,21 @@ The **Best results** tab (also in `TIPS.md`) explains how to get the most out of
 Every search also saves a report in the `results` folder: `report.html` (open it in a browser to see or print it),
 plus `results.csv` (opens in Excel) and `results.json`.
 
+### DVR footage: fetch recordings straight from the DVR / NVR
+
+Tab **DVR footage**: type the DVR's address and login (filled in from Live cameras when a camera is
+added there), pick the channels, a date and a time range, and click **Download and index**.
+
+* **Check what is recorded** asks the DVR which minutes have recordings, so empty hours are skipped.
+* The range is cut into pieces (10 minutes by default). The next piece downloads while one is
+  indexed, and each piece is searchable as soon as it is done, with the DVR's own clock time.
+* Download uses the DVR's web download (Hikvision ISAPI, Dahua loadfile.cgi), which is faster than
+  real time. If the DVR refuses it, RTSP playback is copied instead (real-time speed only).
+* It runs in its own background process, so it continues when the page is closed. Progress and a
+  Stop button are under **Downloads** in the same tab.
+* Videos go to `dvr_videos/`. Tick **Delete each video after indexing** to save disk space: the
+  pictures of plates and faces are kept, so results still show.
+
 ## Command line
 
 ```bash

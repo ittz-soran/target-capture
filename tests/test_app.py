@@ -14,6 +14,6 @@ def test_app_renders_all_tabs(tmp_path, monkeypatch):
     at = AppTest.from_file(app, default_timeout=120).run()
     assert not at.exception
     labels = [w.label for w in at.text_input]
-    for want in ("Index database", "Plate number", "Filter by vehicle", "Index database file"):
+    for want in ("Index database", "Plate number", "Filter by vehicle", "Index database file", "IP address"):
         assert any(lbl.startswith(want) for lbl in labels), want
-    assert len(at.tabs) == 11
+    assert len(at.tabs) == 12

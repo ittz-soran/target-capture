@@ -94,6 +94,19 @@ def sub_stream(path: str) -> str:
     return path.replace("subtype=0", "subtype=1")
 
 
+def clean_host(text: str) -> tuple[str, int | None]:
+    """The DVR's address as typed, in any form ("192.168.1.230", "http://192.168.1.230/",
+    "192.168.1.230:8080", a pasted web-page link): (host, port written in it or None)."""
+    t = (text or "").strip()
+    t = re.sub(r"^[a-z][a-z0-9+.-]*://", "", t, flags=re.I)  # http://, rtsp://
+    t = t.split("/")[0].split("?")[0].split("#")[0]
+    t = t.rsplit("@", 1)[-1]  # user:password@
+    m = re.match(r"^\[?([^\]]+?)\]?(?::(\d+))?$", t)
+    if not m:
+        return t, None
+    return m.group(1), (int(m.group(2)) if m.group(2) else None)
+
+
 def _creds(user: str, password: str) -> list[str]:
     """user:password as it goes into a stream address. Only the characters that would break
     the address are encoded first (many DVRs and ffmpeg builds do not decode the rest, e.g. a

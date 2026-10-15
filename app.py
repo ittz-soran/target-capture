@@ -574,6 +574,11 @@ with tab_dvr:
         check = g1.form_submit_button("Check what is recorded")
         go = g2.form_submit_button("Download and index", type="primary")
     start_t, end_t = dt.datetime.combine(d_from, t_from), dt.datetime.combine(d_to, t_to)
+    from targetcapture.live import clean_host
+
+    f_ip, typed_port = clean_host(f_ip)  # also takes a pasted web address like http://192.168.1.230/
+    if typed_port and typed_port != int(f_rtsp):  # a web-page address with its port
+        f_http = typed_port
     if (check or go) and (not f_ip.strip() or not f_pass or not f_ch or end_t <= start_t):
         st.error("Type the IP address and password, pick at least one channel, and an end after the start.")
     elif check:
@@ -731,7 +736,9 @@ with tab_cams:
                     from targetcapture.live import (check_login, dvr_paths, hik_rtsp_port, rtsp_describe,
                                                     stream_url, sub_stream, test_camera)
 
-                    ip, found, problem, log = dip.strip(), None, "", []
+                    from targetcapture.live import clean_host
+
+                    ip, found, problem, log = clean_host(dip)[0], None, "", []
                     with st.status("Connecting to channel 1…", expanded=True) as box:
                         st.write("Checking the user name and password with the DVR's web login…")
                         login, info = check_login(dbrand, ip, duser, dpass)

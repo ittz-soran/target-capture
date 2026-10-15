@@ -29,6 +29,7 @@ from urllib.parse import quote
 from .live import _creds, ffmpeg_exe
 
 HIK = "hik"
+_URIS: dict = {}  # (ip, channel) -> [(start, end, playbackURI)] from the last recording search
 
 
 def is_hik(make: str) -> bool:
@@ -73,6 +74,10 @@ def find_recordings(make: str, ip: str, user: str, password: str, channel: int, 
                     return None
                 items = re.findall(r"<timeSpan>\s*<startTime>([^<]+)</startTime>\s*<endTime>([^<]+)</endTime>", r.text)
                 out += [(_parse_t(a), _parse_t(b)) for a, b in items]
+                for m in re.finditer(r"<startTime>([^<]+)</startTime>\s*<endTime>([^<]+)</endTime>.*?"
+                                     r"<playbackURI>([^<]+)</playbackURI>", r.text, re.S):
+                    _URIS.setdefault((ip, channel), []).append((_parse_t(m.group(1)), _parse_t(m.group(2)),
+                                                                 m.group(3)))
                 if "MORE" not in r.text or not items or pos > 2000:
                     return out
                 pos += len(items)
@@ -137,59 +142,100 @@ def playback_url(make: str, ip: str, rtsp_port: int, user: str, password: str, c
             f"&starttime={start.strftime(f)}&endtime={end.strftime(f)}")
 
 
+def _hik_requests(ip, channel, start, end):
+    """The forms of the ISAPI download request, most common first (firmware differ)."""
+    f = "%Y%m%dT%H%M%SZ"
+    uris = [f"rtsp://{ip}/Streaming/tracks/{channel}01/?starttime={start.strftime(f)}&endtime={end.strftime(f)}"]
+    for a, b, uri in _URIS.get((ip, channel), []):  # the recording's own address from the search
+        if a <= start < b:
+            uri = uri.replace("&amp;", "&")
+            uri = re.sub(r"starttime=[^&]*", f"starttime={start.strftime(f)}", uri)
+            uri = re.sub(r"endtime=[^&]*", f"endtime={end.strftime(f)}", uri)
+            uris.append(uri)
+            break
+    out = []
+    for uri in uris:
+        esc = uri.replace("&", "&amp;")
+        body = (f'<?xml version="1.0" encoding="UTF-8"?><downloadRequest version="1.0" '
+                f'xmlns="http://www.isapi.org/ver20/XMLSchema"><playbackURI>{esc}</playbackURI></downloadRequest>')
+        out += [("GET", "/ISAPI/ContentMgmt/download", body), ("POST", "/ISAPI/ContentMgmt/download", body),
+                ("GET", "/ISAPI/ContentMgmt/download?playbackURI=" + quote(uri, safe=""), None)]
+    return out
+
+
 def _http_download(make, ip, http_port, user, password, channel, start, end, path, stop) -> str:
     """Download one piece over the DVR's web port. Returns '' when done, else the reason."""
     import requests
 
     base = f"http://{ip}:{http_port}"
     if is_hik(make):
-        f = "%Y%m%dT%H%M%SZ"
-        uri = (f"rtsp://{ip}/Streaming/tracks/{channel}01/?starttime={start.strftime(f)}"
-               f"&amp;endtime={end.strftime(f)}")
-        body = (f'<?xml version="1.0" encoding="UTF-8"?><downloadRequest version="1.0" '
-                f'xmlns="http://www.isapi.org/ver20/XMLSchema"><playbackURI>{uri}</playbackURI></downloadRequest>')
-        req = lambda: requests.request("GET", f"{base}/ISAPI/ContentMgmt/download", data=body,  # noqa: E731
-                                       auth=_auth(user, password), stream=True, timeout=30)
+        tries = _hik_requests(ip, channel, start, end)
     else:
         q = (f"action=startLoad&channel={channel}&startTime={quote(start.strftime('%Y-%m-%d %H:%M:%S'), safe=':')}"
              f"&endTime={quote(end.strftime('%Y-%m-%d %H:%M:%S'), safe=':')}&subtype=0")
-        req = lambda: requests.get(f"{base}/cgi-bin/loadfile.cgi?{q}", auth=_auth(user, password),  # noqa: E731
-                                   stream=True, timeout=30)
-    try:
-        with req() as r:
-            if r.status_code != 200:
-                return f"web download answered {r.status_code}"
-            if "xml" in r.headers.get("Content-Type", "") or "text" in r.headers.get("Content-Type", ""):
-                return "web download not supported: " + r.text[:120].replace("\n", " ")
-            with open(path, "wb") as fh:
-                for chunk in r.iter_content(1 << 20):
-                    if stop.is_set():
-                        return "stopped"
-                    fh.write(chunk)
-    except requests.RequestException as e:
-        return f"web download failed: {e.__class__.__name__}"
-    return "" if os.path.getsize(path) > 50_000 else "web download gave no video"
+        tries = [("GET", f"/cgi-bin/loadfile.cgi?{q}", None)]
+    why = ""
+    for method, url, body in tries:
+        try:
+            with requests.request(method, base + url, data=body, auth=_auth(user, password), stream=True,
+                                  timeout=(10, 60)) as r:
+                ctype = r.headers.get("Content-Type", "")
+                if r.status_code == 401:
+                    return "the DVR refused the user name / password for downloads"
+                if r.status_code != 200 or "xml" in ctype or "text" in ctype or "json" in ctype:
+                    text = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", r.text[:400])).strip() if r.status_code != 200 \
+                        or "xml" in ctype or "text" in ctype else ""
+                    why = f"answered {r.status_code}" + (f": {text[:150]}" if text else "")
+                    continue
+                with open(path, "wb") as fh:
+                    for chunk in r.iter_content(1 << 20):
+                        if stop.is_set():
+                            return "stopped"
+                        fh.write(chunk)
+            if os.path.getsize(path) > 50_000:
+                return ""
+            why = "gave no video"
+        except requests.ConnectionError:
+            return f"could not connect to the DVR's web port {http_port} (check the IP address and Web port)"
+        except requests.RequestException as e:
+            why = f"failed: {e.__class__.__name__}"
+    return why or "not supported"
 
 
-def _rtsp_download(url, seconds, path, stop) -> str:
-    """Copy a piece from RTSP playback (real-time speed)."""
+def _rtsp_download(url, seconds, path, stop, status=lambda msg: None) -> str:
+    """Copy a piece from RTSP playback (real-time speed), telling how far it is."""
     exe = ffmpeg_exe()
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-    proc = subprocess.Popen([exe, "-nostdin", "-y", "-loglevel", "error", "-rtsp_transport", "tcp", "-i", url,
+    proc = subprocess.Popen([exe, "-nostdin", "-y", "-loglevel", "error", "-progress", "pipe:1", "-nostats",
+                             "-rtsp_transport", "tcp", "-timeout", "15000000", "-i", url,
                              "-map", "0:v:0", "-c", "copy", "-t", f"{seconds:.0f}", "-f", "mpegts", path],
-                            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                             creationflags=flags)
-    limit = time.time() + seconds * 1.5 + 60
+    got = [0.0, time.time()]  # seconds copied, when it last grew
+
+    def read_progress():
+        for line in proc.stdout:
+            m = re.match(rb"out_time_us=(\d+)", line)
+            if m and int(m.group(1)) / 1e6 > got[0]:
+                got[0], got[1] = int(m.group(1)) / 1e6, time.time()
+
+    threading.Thread(target=read_progress, daemon=True).start()
+    shown = 0.0
     while proc.poll() is None:
-        if stop.is_set() or time.time() > limit:
+        if stop.is_set() or time.time() - got[1] > 60:  # nothing new for a minute: give up on it
             proc.kill()
             break
+        if time.time() - shown > 5:
+            shown = time.time()
+            status(f"downloading (playback, real-time speed): {got[0] / 60:.1f} of {seconds / 60:.0f} min")
         time.sleep(0.5)
     err = proc.stderr.read().decode(errors="replace").strip()[-200:]
     if stop.is_set():
         return "stopped"
     if os.path.exists(path) and os.path.getsize(path) > 50_000:
         return ""
+    if not got[0] and not err:
+        err = "the DVR sent no video for a minute"
     return "playback gave no video" + (f" ({re.sub(r'rtsp://[^@ ]*@', 'rtsp://', err)})" if err else "")
 
 
@@ -234,20 +280,21 @@ def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime
         url = playback_url(job["make"], job["ip"], job.get("rtsp_port", 554), job["user"], job["password"],
                            channel, start, end)
         ways.append(("playback (real-time speed)", lambda: _rtsp_download(url, (end - start).total_seconds(), raw,
-                                                                          stop)))
+                                                                          stop, status)))
     for how, fetch in ways:
         if stop.is_set():
             break
-        status(f"downloading ({how})")
+        status(f"downloading ({how})" + (f" because {reasons[-1]}" if reasons else ""))
         why = fetch()
+        note = how + (f" ({'; '.join(reasons)})" if reasons else "")
         if not why and _to_mp4(raw, mp4):
             os.remove(raw)
-            return mp4, how
+            return mp4, note
         if not why:  # the .mp4 copy failed: index the file as it came, if it can be read
             kept = os.path.join(folder, name + (".ts" if "playback" in how else ".ps" if is_hik(job["make"]) else ".dav"))
             os.replace(raw, kept)
             if _readable(kept):
-                return kept, how
+                return kept, note
             os.remove(kept)
         reasons.append(f"{how}: {why or 'not a readable video'}")
         if why == "stopped":

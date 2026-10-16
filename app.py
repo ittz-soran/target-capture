@@ -716,13 +716,22 @@ with tab_dvr:
         w_folder = w1.text_input("Folder", CFG["dvr_folder"] or D.default_folder(db_path), key="watch_folder")
         w_watch = w2.checkbox("Keep watching for new files", True)
         w_delete = w2.checkbox("Delete each video after indexing", CFG["dvr_delete_after"], key="watch_del")
+        w3, w4, w5 = st.columns(3)
+        w_plates = w3.checkbox("Read plates", CFG["read_plates"], key="watch_plates")
+        w_people = w4.checkbox("Find people (faces)", CFG["find_people"], key="watch_people",
+                               help="Off = plates only, which is faster.")
+        w_speeds = [s_ for s_ in C.SPEED_NAMES if s_ != "custom"]
+        w_speed = w5.selectbox("Speed", w_speeds, format_func=C.SPEED_NAMES.get, key="watch_speed",
+                               index=w_speeds.index(CFG["speed"]) if CFG["speed"] in w_speeds else 0)
         if st.button("Index this folder"):
-            if not os.path.isdir(w_folder.strip()):
+            if not (w_plates or w_people):
+                st.error("Tick plates, people or both.")
+            elif not os.path.isdir(w_folder.strip()):
                 st.error("That folder does not exist.")
             else:
                 job = {"kind": "folder", "name": os.path.basename(os.path.normpath(w_folder.strip())) or "folder",
                        "folder": w_folder.strip(), "watch": w_watch, "delete_after": w_delete,
-                       "plates": CFG["read_plates"], "persons": CFG["find_people"], "speed": CFG["speed"]}
+                       "plates": w_plates, "persons": w_people, "speed": w_speed}
                 start_fetch(D.new_job(db_path, job))
                 st.success("Started. Progress shows below.")
 

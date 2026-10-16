@@ -1,5 +1,5 @@
 """Target Capture: index long videos once, then search them for plates or people."""
-__version__ = "0.6.8"
+__version__ = "0.6.9"
 
 import os as _os
 import warnings as _warnings

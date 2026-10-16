@@ -25,3 +25,22 @@ def test_failed_job_shows_reason(tmp_path):
     s = dvr.read_status(str(tmp_path / "2.status.json"))
     assert s["state"] == "failed: OSError: disk full" and not job.exists()
     assert not dvr.is_stale(s)
+
+
+def test_status_write_survives_a_busy_file(tmp_path, monkeypatch):
+    """Windows: the page reading the status file makes the swap fail for a moment."""
+    real, calls = os.replace, []
+
+    def busy(a, b):
+        calls.append(1)
+        if len(calls) < 3:
+            raise PermissionError(5, "Access is denied")
+        real(a, b)
+
+    monkeypatch.setattr(dvr.os, "replace", busy)
+    path = str(tmp_path / "1.status.json")
+    assert dvr.write_status(path, {"state": "running"})
+    assert dvr.read_status(path) == {"state": "running"} and len(calls) == 3
+    monkeypatch.setattr(dvr.os, "replace", lambda a, b: (_ for _ in ()).throw(PermissionError(5, "denied")))
+    assert not dvr.write_status(path, {"state": "x"}, tries=2)  # skipped, not crashed
+    assert os.listdir(tmp_path) == ["1.status.json"]

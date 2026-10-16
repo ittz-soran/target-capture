@@ -503,8 +503,7 @@ def fail_job(job_path: str, err: BaseException):
                                      "from": "", "to": "", "pieces": []}
     s["state"] = f"failed: {type(err).__name__}: {err}"[:300]
     s["updated"] = dt.datetime.now().isoformat(timespec="seconds")
-    with open(status_path, "w", encoding="utf-8") as fh:
-        json.dump(s, fh)
+    write_status(status_path, s, tries=200)
     for f in (job_path, job_path[:-5] + ".stop"):
         if os.path.exists(f):
             os.remove(f)
@@ -533,6 +532,26 @@ def new_job(db_path: str, job: dict) -> str:
     with open(path, "w", encoding="utf-8") as f:
         json.dump({**job, "id": jid}, f)
     return path
+
+
+def write_status(path: str, state: dict, tries: int = 40) -> bool:
+    """Write a status file whole. On Windows the page (or an antivirus) reading it at that moment
+    makes the swap fail with "Access is denied", so it is retried for a few seconds; if the file
+    stays busy the update is skipped (the next one, at most 30 s later, brings it up to date)."""
+    tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(state, fh)
+    for i in range(tries):
+        try:
+            os.replace(tmp, path)
+            return True
+        except PermissionError:
+            time.sleep(0.05 + 0.01 * i)
+    try:
+        os.remove(tmp)
+    except OSError:
+        pass
+    return False
 
 
 def read_status(path: str) -> dict | None:
@@ -592,10 +611,8 @@ class _Job:
     def save(self):
         with self.lock:
             self.state["updated"] = dt.datetime.now().isoformat(timespec="seconds")
-            tmp = self.status_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(self.state, fh)
-            os.replace(tmp, self.status_path)
+            final = self.state.get("state") not in ("running", "finding recordings")
+            write_status(self.status_path, self.state, tries=200 if final else 40)
 
     def finish(self):
         self.closed.set()

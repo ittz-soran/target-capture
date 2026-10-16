@@ -218,6 +218,15 @@ added there), pick the channels, a date and a time range, and click **Download a
   every video is indexed, and with **Keep watching** each new file as soon as its download finishes.
   The time in the file name is used as the clock time.
 
+### Use it from other devices (phone, laptop, another office)
+
+The work always runs on the PC with the graphics card; other devices only open the page.
+Settings > **Use from other devices** shows the address to open. On the same network it works at once.
+From anywhere, install [Tailscale](https://tailscale.com/download) (free) on the PC and on the phone or
+laptop, signed in with the same account: the PC's 100.x.x.x address then shows there, and only your
+own devices can reach it. Set a **page password** first: other devices are asked for it (this PC is
+not). Do not open the port on the router to the whole internet.
+
 ## Command line
 
 ```bash

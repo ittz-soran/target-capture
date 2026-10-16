@@ -28,6 +28,7 @@ DEFAULTS = {
     "dvr_folder": "",         # where DVR footage is downloaded ("" = dvr_videos next to the index)
     "dvr_delete_after": False,  # delete each downloaded video once indexed
     "dvr_parallel": 2,        # pieces downloaded at the same time
+    "page_password": "",      # "salt$hash"; asked on other devices (not on this PC) when set
     "keep_frames": True,      # keep pictures of frames with plates / faces while indexing
     "gpu_decode": True,       # decode video on the graphics card when possible (falls back by itself)
     # Searching
@@ -112,3 +113,21 @@ if __name__ == "__main__":  # run_windows.bat: python -m targetcapture.settings 
     import sys
 
     print(load()[sys.argv[1]])
+
+
+def hash_password(pw: str) -> str:
+    import hashlib
+    import secrets
+
+    salt = secrets.token_hex(8)
+    return salt + "$" + hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000).hex()
+
+
+def check_password(pw: str, stored: str) -> bool:
+    import hashlib
+    import hmac
+
+    if "$" not in (stored or ""):
+        return False
+    salt, h = stored.split("$", 1)
+    return hmac.compare_digest(hashlib.pbkdf2_hmac("sha256", pw.encode(), salt.encode(), 100_000).hex(), h)

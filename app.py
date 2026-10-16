@@ -31,6 +31,25 @@ SCRIPTS = ["auto", "latin", "arabic"]
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 
 st.set_page_config(page_title="Target Capture", layout="wide")
+
+
+def from_this_pc() -> bool:
+    ip = st.context.ip_address
+    return ip is None or ip.startswith("127.") or ip in ("::1", "localhost")
+
+
+# Opened from another device (phone, office, Tailscale): ask the page password set in Settings
+if CFG["page_password"] and not from_this_pc() and not st.session_state.get("signed_in"):
+    st.title("Target Capture")
+    with st.form("sign_in"):
+        pw = st.text_input("Password", type="password")
+        if st.form_submit_button("Sign in", type="primary"):
+            if C.check_password(pw, CFG["page_password"]):
+                st.session_state["signed_in"] = True
+                st.rerun()
+            st.error("Wrong password.")
+    st.stop()
+
 st.title("Target Capture")
 db_path = st.sidebar.text_input("Index database", CFG["db_path"])
 store = Store(db_path)
@@ -1203,6 +1222,49 @@ with tab_settings:
             else:
                 st.code("git pull && pip install -r requirements.txt", language="bash")
 
+    st.subheader("Use from other devices")
+    import socket
+
+    port = st.get_option("server.port")
+    addrs = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sk:
+            sk.connect(("10.255.255.255", 1))
+            addrs.add(sk.getsockname()[0])
+    except OSError:
+        pass
+    try:
+        addrs |= {a[4][0] for a in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)}
+    except OSError:
+        pass
+    addrs = sorted(a for a in addrs if not a.startswith("127."))
+    tail = [a for a in addrs if a.startswith("100.")]
+    lan = [a for a in addrs if not a.startswith("100.")]
+    st.markdown(
+        "The work (downloads, indexing, live cameras) always runs on this PC with its graphics card; other "
+        "devices only show the page.\n\n"
+        + (f"* **Same network** (office Wi-Fi): " + ", ".join(f"`http://{a}:{port}`" for a in lan) + "\n" if lan else "")
+        + ("* **From anywhere (Tailscale):** " + ", ".join(f"`http://{a}:{port}`" for a in tail) + "\n" if tail else
+           "* **From anywhere:** install [Tailscale](https://tailscale.com/download) (free) on this PC and on your "
+           "phone or laptop, signed in with the same account. Its address for this PC (100.x.x.x) then shows here. "
+           "It is private: only your own devices can open the page.\n"))
+    st.caption(f"Do not open port {port} on the router to the whole internet: the page shows faces and plates.")
+    p1, p2, p3 = st.columns([2, 1, 1])
+    new_pw = p1.text_input("Page password for other devices" + (" (set)" if CFG["page_password"] else ""),
+                           type="password", help="Asked when the page is opened from another device, not on this PC.")
+    if p2.button("Set password", help="At least 6 characters."):
+        if len(new_pw) < 6:
+            st.error("Use at least 6 characters.")
+        else:
+            C.save({"page_password": C.hash_password(new_pw)})
+            st.success("Password set. Other devices are asked for it from now on.")
+    if CFG["page_password"] and p3.button("Remove password", disabled=not from_this_pc(),
+                                          help="Only from this PC."):
+        C.save({"page_password": ""})
+        st.success("Password removed.")
+    if not CFG["page_password"]:
+        st.warning("No page password yet: set one before using the page from other devices.")
+
     if os.name == "nt":
         st.subheader("Start and graphics card")
         st.caption("Everything the .bat files in the Target Capture folder do, from here. You only need "
@@ -1292,7 +1354,7 @@ with tab_settings:
         save = b1.form_submit_button("Save", type="primary")
         reset = b2.form_submit_button("Back to defaults")
     if save or reset:
-        C.save(C.DEFAULTS if reset else n)
+        C.save({**C.DEFAULTS, "page_password": CFG["page_password"]} if reset else n)
         st.toast("Settings saved.")
         st.rerun()
 

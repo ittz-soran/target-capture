@@ -25,6 +25,9 @@ DEFAULTS = {
     "vehicle_crops": False,
     "skip_empty_road": False,
     "min_ocr_conf": 0.5,
+    "dvr_folder": "",         # where DVR footage is downloaded ("" = dvr_videos next to the index)
+    "dvr_delete_after": False,  # delete each downloaded video once indexed
+    "dvr_parallel": 2,        # pieces downloaded at the same time
     "keep_frames": True,      # keep pictures of frames with plates / faces while indexing
     "gpu_decode": True,       # decode video on the graphics card when possible (falls back by itself)
     # Searching

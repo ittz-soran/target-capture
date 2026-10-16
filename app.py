@@ -516,6 +516,60 @@ if not _auto["done"]:
         st.toast("Live monitoring started (Settings: start when the page opens).")
 
 
+def folder_size(path):
+    if os.path.isfile(path):
+        return os.path.getsize(path)
+    total = 0
+    for root, _, files in os.walk(path):
+        for f in files:
+            try:
+                total += os.path.getsize(os.path.join(root, f))
+            except OSError:
+                pass
+    return total
+
+
+def human(n):
+    for unit in ("B", "KB", "MB", "GB"):
+        if n < 1024 or unit == "GB":
+            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
+        n /= 1024
+
+
+def indexed_downloads():
+    """Downloaded DVR videos that are already indexed (safe to delete: results keep their pictures)."""
+    from targetcapture.dvr import default_folder
+
+    folders = {os.path.abspath(f) + os.sep for f in (default_folder(db_path), CFG["dvr_folder"]) if f}
+    out = []
+    for m in store.db.execute("SELECT path FROM media").fetchall():
+        p = os.path.abspath(m["path"] or "")
+        if any(p.startswith(f) for f in folders) and os.path.isfile(p):
+            out.append(p)
+    return out
+
+
+def delete_downloads_button(key):
+    files = indexed_downloads()
+    size = sum(os.path.getsize(f) for f in files)
+    with st.popover(f"Delete indexed DVR downloads ({human(size)})", disabled=not files,
+                    help="Videos downloaded from the DVR that are already indexed. Results and their pictures stay."):
+        st.write(f"Delete {len(files)} downloaded video(s), {human(size)}? Search results stay, with their pictures.")
+        if st.button("Yes, delete", key=key, type="primary"):
+            for f in files:
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
+            st.rerun()
+
+
+def start_fetch(job_path):
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    subprocess.Popen([sys.executable, "-m", "targetcapture", "--db", db_path, "fetch", job_path], creationflags=flags,
+                     cwd=APP_DIR, stdout=open(os.path.join(APP_DIR, "dvr_fetch.log"), "a"), stderr=subprocess.STDOUT)
+
+
 def dvr_defaults():
     """DVR address and login from a camera added in the Live cameras tab (so they are typed once)."""
     from urllib.parse import unquote, urlparse
@@ -532,23 +586,35 @@ def dvr_defaults():
 with tab_dvr:
     from targetcapture import dvr as D
 
-    st.caption("Pick a DVR / NVR, the channels and a time: the recordings are downloaded piece by piece and "
-               "indexed with your Settings, the next piece downloading while one is indexed. It keeps running "
-               "when this page is closed. Results appear in the search tabs after each piece, with the DVR's "
-               "own clock time.")
-    dd = dvr_defaults()
+    st.caption("Pick a DVR / NVR, the channels and a time: the recordings are downloaded (several pieces at "
+               "once) and each piece is indexed with your Settings as soon as it arrives. It keeps running when "
+               "this page is closed. Results appear in the search tabs after each piece, with the DVR's own clock "
+               "time.")
+    saved = {d["name"]: dict(d) for d in store.dvrs()}
+    s1, s2 = st.columns([3, 1])
+    pick = s1.selectbox("Saved DVR / NVR", ["New DVR / NVR"] + list(saved), index=1 if saved else 0,
+                        help="Tick 'Save these DVR details' below to add one.")
+    if pick in saved and s2.button("Forget this DVR", key="dvr_forget"):
+        store.remove_dvr(pick)
+        st.rerun()
+    if pick in saved:
+        dd = {**saved[pick], "name": pick}
+    else:
+        dd = {**dvr_defaults(), "http_port": 80}
+    k = f"_{pick}"  # the fields refresh when another saved DVR is picked
     makes = ["Hikvision / HiLook", "Dahua / Imou"]
     with st.form("dvr_fetch"):
         a1, a2, a3, a4 = st.columns(4)
-        f_name = a1.text_input("Name", dd["name"])
-        f_ip = a2.text_input("IP address", dd["ip"], placeholder="192.168.1.230")
-        f_make = a3.selectbox("Make", makes, index=makes.index(dd["make"]))
+        f_name = a1.text_input("Name", dd["name"], key="dn" + k)
+        f_ip = a2.text_input("IP address", dd["ip"], placeholder="192.168.1.230", key="di" + k)
+        f_make = a3.selectbox("Make", makes, index=makes.index(dd["make"]) if dd["make"] in makes else 0, key="dm" + k)
         f_ch = a4.multiselect("Channels", list(range(1, 65)), [1])
         b1, b2, b3, b4 = st.columns(4)
-        f_user = b1.text_input("User name", dd["user"])
-        f_pass = b2.text_input("Password", dd["password"], type="password")
-        f_http = b3.number_input("Web port", 1, 65535, 80, help="The port of the DVR's web page (normally 80).")
-        f_rtsp = b4.number_input("RTSP port", 1, 65535, int(dd["rtsp_port"]))
+        f_user = b1.text_input("User name", dd["user"], key="du" + k)
+        f_pass = b2.text_input("Password", dd["password"], type="password", key="dp" + k)
+        f_http = b3.number_input("Web port", 1, 65535, int(dd.get("http_port") or 80), key="dh" + k,
+                                 help="The port of the DVR's web page (normally 80).")
+        f_rtsp = b4.number_input("RTSP port", 1, 65535, int(dd["rtsp_port"]), key="dr" + k)
         today = dt.date.today()
         c1, c2, c3, c4 = st.columns(4)
         d_from = c1.date_input("From date", today)
@@ -558,18 +624,24 @@ with tab_dvr:
         e1, e2, e3, e4 = st.columns(4)
         f_plates = e1.checkbox("Read plates", CFG["read_plates"])
         f_people = e1.checkbox("Find people", CFG["find_people"])
-        speeds = list(C.SPEED_NAMES)
-        f_speed = e2.radio("Speed", [s_ for s_ in speeds if s_ != "custom"], format_func=C.SPEED_NAMES.get,
-                           index=[s_ for s_ in speeds if s_ != "custom"].index(CFG["speed"])
-                           if CFG["speed"] != "custom" else 0)
+        speeds = [s_ for s_ in C.SPEED_NAMES if s_ != "custom"]
+        f_speed = e2.radio("Speed", speeds, format_func=C.SPEED_NAMES.get,
+                           index=speeds.index(CFG["speed"]) if CFG["speed"] in speeds else 0)
         f_piece = e3.selectbox("Piece length", [5, 10, 15, 30, 60], index=1, format_func=lambda m: f"{m} minutes",
                                help="Shorter pieces show the first results sooner.")
-        f_method = e3.selectbox("Download by", ["auto", "web", "rtsp"], format_func={
+        f_par = e3.selectbox("Download at the same time", [1, 2, 3, 4], index=min(3, int(CFG["dvr_parallel"]) - 1),
+                             format_func=lambda n: f"{n} piece{'s' if n > 1 else ''}",
+                             help="The DVR sends each download at a limited speed; several at once is faster "
+                                  "in total. Lower it if the DVR's live view stutters.")
+        f_method = e4.selectbox("Download by", ["auto", "web", "rtsp"], format_func={
             "auto": "Fastest that works", "web": "Web download only (fast)",
             "rtsp": "Playback only (real-time speed)"}.get)
-        f_delete = e4.checkbox("Delete each video after indexing", False,
+        f_delete = e4.checkbox("Delete each video after indexing", CFG["dvr_delete_after"],
                                help="Saves disk space. The pictures of plates and faces are kept, so results "
                                     "still show; only playing the video is no longer possible.")
+        f_folder = st.text_input("Save downloads in", CFG["dvr_folder"] or D.default_folder(db_path),
+                                 help="Any folder on this PC or a USB / network drive, e.g. D:\\DVR downloads")
+        f_save = st.checkbox("Save these DVR details (name, address, login) for next time", pick not in saved)
         g1, g2 = st.columns([1, 1])
         check = g1.form_submit_button("Check what is recorded")
         go = g2.form_submit_button("Download and index", type="primary")
@@ -581,7 +653,14 @@ with tab_dvr:
         f_http = typed_port
     if (check or go) and (not f_ip.strip() or not f_pass or not f_ch or end_t <= start_t):
         st.error("Type the IP address and password, pick at least one channel, and an end after the start.")
-    elif check:
+    elif check or go:
+        if f_save:
+            store.save_dvr(f_name.strip() or "DVR", f_make, f_ip, f_user, f_pass, f_http, f_rtsp)
+        folder = f_folder.strip() or D.default_folder(db_path)
+        if go:  # remember the download choices
+            C.save({**C.load(), "dvr_folder": "" if folder == D.default_folder(db_path) else folder,
+                    "dvr_delete_after": f_delete, "dvr_parallel": f_par})
+    if check and f_ip and f_pass and f_ch and end_t > start_t:
         with st.spinner("Asking the DVR…"):
             for ch in f_ch:
                 rec = D.find_recordings(f_make, f_ip.strip(), f_user, f_pass, ch, start_t, end_t, int(f_http))
@@ -594,18 +673,39 @@ with tab_dvr:
                     spans = ", ".join(f"{a:%H:%M}–{b:%H:%M}" for a, b in D.pieces(start_t, end_t, 24 * 60, rec)[:12])
                     (st.success if mins else st.info)(
                         f"Channel {ch}: {mins} minute(s) recorded" + (f" ({spans})" if spans else "") + ".")
-    elif go:
-        job = {"name": f_name.strip() or "DVR", "make": f_make, "ip": f_ip.strip(), "user": f_user,
-               "password": f_pass, "http_port": int(f_http), "rtsp_port": int(f_rtsp), "channels": f_ch,
-               "start": start_t.isoformat(sep=" "), "end": end_t.isoformat(sep=" "), "piece_minutes": f_piece,
-               "method": f_method, "plates": f_plates, "persons": f_people, "speed": f_speed,
-               "delete_after": f_delete}
-        jp = D.new_job(db_path, job)
-        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
-        subprocess.Popen([sys.executable, "-m", "targetcapture", "--db", db_path, "fetch", jp], creationflags=flags,
-                         cwd=APP_DIR, stdout=open(os.path.join(APP_DIR, "dvr_fetch.log"), "a"),
-                         stderr=subprocess.STDOUT)
-        st.success("Started. Progress shows below.")
+    elif go and f_ip and f_pass and f_ch and end_t > start_t:
+        try:
+            os.makedirs(folder, exist_ok=True)
+        except OSError as e:
+            st.error(f"Cannot use the folder {folder}: {e}")
+        else:
+            job = {"name": f_name.strip() or "DVR", "make": f_make, "ip": f_ip.strip(), "user": f_user,
+                   "password": f_pass, "http_port": int(f_http), "rtsp_port": int(f_rtsp), "channels": f_ch,
+                   "start": start_t.isoformat(sep=" "), "end": end_t.isoformat(sep=" "), "piece_minutes": f_piece,
+                   "method": f_method, "plates": f_plates, "persons": f_people, "speed": f_speed,
+                   "delete_after": f_delete, "folder": folder, "parallel": f_par}
+            start_fetch(D.new_job(db_path, job))
+            st.success("Started. Progress shows below.")
+
+    delete_downloads_button("del_dl_tab")
+    with st.expander("Index videos downloaded with the DVR's own web page"):
+        st.caption("If you download with the DVR / NVR's web page, save the files into one folder and start this: "
+                   "every video in it is indexed, and with 'Keep watching' each new file is indexed as soon as "
+                   "its download finishes. The time in the file name (e.g. ..._20261014100000_...) is used as the "
+                   "clock time.")
+        w1, w2 = st.columns([3, 1])
+        w_folder = w1.text_input("Folder", CFG["dvr_folder"] or D.default_folder(db_path), key="watch_folder")
+        w_watch = w2.checkbox("Keep watching for new files", True)
+        w_delete = w2.checkbox("Delete each video after indexing", CFG["dvr_delete_after"], key="watch_del")
+        if st.button("Index this folder"):
+            if not os.path.isdir(w_folder.strip()):
+                st.error("That folder does not exist.")
+            else:
+                job = {"kind": "folder", "name": os.path.basename(os.path.normpath(w_folder.strip())) or "folder",
+                       "folder": w_folder.strip(), "watch": w_watch, "delete_after": w_delete,
+                       "plates": CFG["read_plates"], "persons": CFG["find_people"], "speed": CFG["speed"]}
+                start_fetch(D.new_job(db_path, job))
+                st.success("Started. Progress shows below.")
 
     @st.fragment(run_every=3)
     def dvr_jobs():
@@ -618,22 +718,31 @@ with tab_dvr:
             done = sum(p["state"] == "done" for p in ps)
             running = j["state"] in ("running", "finding recordings")
             stale = running and (dt.datetime.now() - dt.datetime.fromisoformat(j["updated"])).total_seconds() > 600
-            head = (f"**{j['name']}** · channel(s) {', '.join(map(str, j['channels']))} · {j['from'][:16]} to "
-                    f"{j['to'][:16]} · {done} of {len(ps)} pieces indexed · "
-                    + ("stopped unexpectedly" if stale else j["state"]))
+            if j.get("kind") == "folder":
+                what = f"**Folder {j['folder']}** · {done} file(s) indexed · "
+            else:
+                what = (f"**{j['name']}** · channel(s) {', '.join(map(str, j['channels']))} · {j['from'][:16]} to "
+                        f"{j['to'][:16]} · {done} of {len(ps)} pieces indexed · ")
             h1, h2 = st.columns([5, 1])
-            h1.markdown(head)
+            h1.markdown(what + ("stopped unexpectedly" if stale else j["state"]))
             if running and not stale and h2.button("Stop", key=f"stop_{j['id']}"):
                 open(j["_path"].replace(".status.json", ".stop"), "w").close()
-            if ps:
+            if not running and h2.button("Clear", key=f"clear_{j['id']}", help="Remove this line (results stay)."):
+                os.remove(j["_path"])
+                st.rerun()
+            if ps and j.get("kind") != "folder":
                 h1.progress(done / len(ps))
+            if j.get("download"):
+                h1.caption(j["download"])
             for n in j.get("notes", []):
                 h1.caption(n)
-            with st.expander("Pieces", expanded=running and not stale):
-                st.dataframe([{"channel": p["channel"], "from": p["start"][11:16], "to": p["end"][11:16],
-                               "state": p["state"], "found": ", ".join(f"{v} {k}" for k, v in
-                                                                      p.get("found", {}).items()),
-                               "note": p.get("note", "")} for p in ps], hide_index=True, width="stretch")
+            with st.expander("Pieces" if j.get("kind") != "folder" else "Files", expanded=running and not stale):
+                rows = [{**({"file": p.get("file")} if j.get("kind") == "folder" else
+                            {"channel": p["channel"], "from": p["start"][11:16], "to": p["end"][11:16]}),
+                         "state": p["state"],
+                         "found": ", ".join(f"{v} {k}" for k, v in p.get("found", {}).items()),
+                         "speed": p.get("indexed_in", ""), "note": p.get("note", "")} for p in ps]
+                st.dataframe(rows, hide_index=True, width="stretch")
 
     dvr_jobs()
 
@@ -1019,26 +1128,6 @@ with tab_teach:
 with tab_tips:
     st.markdown(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "TIPS.md"), encoding="utf-8").read())
 
-def folder_size(path):
-    if os.path.isfile(path):
-        return os.path.getsize(path)
-    total = 0
-    for root, _, files in os.walk(path):
-        for f in files:
-            try:
-                total += os.path.getsize(os.path.join(root, f))
-            except OSError:
-                pass
-    return total
-
-
-def human(n):
-    for unit in ("B", "KB", "MB", "GB"):
-        if n < 1024 or unit == "GB":
-            return f"{n:.0f} {unit}" if unit in ("B", "KB") else f"{n:.1f} {unit}"
-        n /= 1024
-
-
 def start_update():
     """Run the updater in its own window from a copy (the update replaces update_windows.bat),
     then close this web page so its files can be replaced; the updater starts it again."""
@@ -1222,6 +1311,7 @@ with tab_settings:
     db_dir = os.path.dirname(os.path.abspath(db_path))
     places = {"Index database": db_path, "Uploaded videos": UPLOADS, "Repaired DVR videos": os.path.join(db_dir, "fixed_videos"),
               "Kept plate and face pictures": os.path.join(db_dir, "kept_frames"),
+              "DVR downloads": CFG["dvr_folder"] or os.path.join(db_dir, "dvr_videos"),
               "Live recordings": "recordings", "Live camera pictures": os.path.join(db_dir, "live_frames"),
               "Results and pictures": RESULTS}
     sizes = {k: folder_size(p) for k, p in places.items() if os.path.exists(p)}
@@ -1266,6 +1356,7 @@ with tab_settings:
             left = clear_folder(frames)
             st.session_state["storage_msg"] = "Deleted." if not left else f"Deleted, except {human(left)} of files in use."
             st.rerun()
+    delete_downloads_button("del_dl_storage")
     if live_on:
         st.caption("Stop live monitoring (Live cameras tab) to delete live recordings or results.")
     if "storage_msg" in st.session_state:

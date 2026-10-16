@@ -163,7 +163,8 @@ def _hik_requests(ip, channel, start, end):
     return out
 
 
-def _http_download(make, ip, http_port, user, password, channel, start, end, path, stop) -> str:
+def _http_download(make, ip, http_port, user, password, channel, start, end, path, stop,
+                   progress=lambda got, total: None) -> str:
     """Download one piece over the DVR's web port. Returns '' when done, else the reason."""
     import requests
 
@@ -187,11 +188,15 @@ def _http_download(make, ip, http_port, user, password, channel, start, end, pat
                         or "xml" in ctype or "text" in ctype else ""
                     why = f"answered {r.status_code}" + (f": {text[:150]}" if text else "")
                     continue
+                total = int(r.headers.get("Content-Length") or 0)
+                got = 0
                 with open(path, "wb") as fh:
-                    for chunk in r.iter_content(1 << 20):
+                    for chunk in r.iter_content(256 << 10):
                         if stop.is_set():
                             return "stopped"
                         fh.write(chunk)
+                        got += len(chunk)
+                        progress(got, total)
             if os.path.getsize(path) > 50_000:
                 return ""
             why = "gave no video"
@@ -260,9 +265,52 @@ def _readable(path: str) -> bool:
         return False
 
 
+class Meter:
+    """Bytes downloaded, for the speed shown on the page (shared by the pieces downloading)."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.total = 0
+        self.recent: list[tuple[float, int]] = []  # (time, total) over the last seconds
+
+    def add(self, n: int):
+        with self.lock:
+            self.total += n
+            now = time.time()
+            self.recent.append((now, self.total))
+            while len(self.recent) > 2 and now - self.recent[0][0] > 10:
+                self.recent.pop(0)
+
+    def speed(self) -> float:
+        """Bytes per second over the last 10 seconds."""
+        with self.lock:
+            if len(self.recent) < 2 or time.time() - self.recent[-1][0] > 10:
+                return 0.0
+            (t0, b0), (t1, b1) = self.recent[0], self.recent[-1]
+            return (b1 - b0) / max(t1 - t0, 0.5)
+
+
+def mb(n: float) -> str:
+    return f"{n / 1e6:.0f} MB" if n >= 10e6 else f"{n / 1e6:.1f} MB"
+
+
 def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime, folder: str,
-                   stop: threading.Event, status=lambda msg: None) -> tuple[str | None, str]:
+                   stop: threading.Event, status=lambda msg: None, meter: Meter | None = None
+                   ) -> tuple[str | None, str]:
     """Fetch one piece into folder. Returns (path to an .mp4, how) or (None, reason)."""
+    meter = meter or Meter()
+    last = {"got": 0, "shown": 0.0, "t0": time.time()}
+
+    def web_progress(got, total):
+        meter.add(got - last["got"])
+        last["got"] = got
+        now = time.time()
+        if now - last["shown"] >= 2:
+            last["shown"] = now
+            rate = got / max(now - last["t0"], 0.1)
+            left = f", about {(total - got) / rate:.0f} s left" if total and rate else ""
+            status(f"downloading: {mb(got)}" + (f" of {mb(total)} ({100 * got / total:.0f}%)" if total else "")
+                   + f", {rate / 1e6:.1f} MB/s{left}")
     os.makedirs(folder, exist_ok=True)
     name = f"{job['name']}_ch{channel}_{start.strftime('%Y%m%d_%H%M%S')}"
     name = re.sub(r"[^A-Za-z0-9_-]+", "_", name)
@@ -275,7 +323,7 @@ def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime
     if job.get("method", "auto") in ("auto", "web"):
         ways.append(("web download", lambda: _http_download(
             job["make"], job["ip"], job.get("http_port", 80), job["user"], job["password"], channel, start, end, raw,
-            stop)))
+            stop, web_progress)))
     if job.get("method", "auto") in ("auto", "rtsp"):
         url = playback_url(job["make"], job["ip"], job.get("rtsp_port", 554), job["user"], job["password"],
                            channel, start, end)
@@ -286,7 +334,14 @@ def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime
             break
         status(f"downloading ({how})" + (f" because {reasons[-1]}" if reasons else ""))
         why = fetch()
-        note = how + (f" ({'; '.join(reasons)})" if reasons else "")
+        took = time.time() - last["t0"]
+        size = os.path.getsize(raw) if os.path.exists(raw) else 0
+        if not why and "playback" in how:
+            meter.add(size)
+        note = how + (f", {mb(size)} at {size / max(took, 0.1) / 1e6:.1f} MB/s" if not why else "") + (
+            f" ({'; '.join(reasons)})" if reasons else "")
+        if not why:
+            status("copying into .mp4")
         if not why and _to_mp4(raw, mp4):
             os.remove(raw)
             return mp4, note
@@ -297,6 +352,7 @@ def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime
                 return kept, note
             os.remove(kept)
         reasons.append(f"{how}: {why or 'not a readable video'}")
+        last.update(got=0, t0=time.time())
         if why == "stopped":
             break
     if os.path.exists(raw):
@@ -343,37 +399,81 @@ def list_jobs(db_path: str) -> list[dict]:
     return out
 
 
-def run_job(db_path: str, job_path: str):
-    """Download and index every piece of a job, the next piece downloading while one is indexed."""
+def default_folder(db_path: str) -> str:
+    return os.path.join(os.path.dirname(os.path.abspath(db_path)), "dvr_videos")
+
+
+class _Job:
+    """Status file and Stop file of one job."""
+
+    def __init__(self, job_path: str, state: dict):
+        self.status_path = job_path[:-5] + ".status.json"
+        self.stop_path = job_path[:-5] + ".stop"
+        self.job_path = job_path
+        self.stop = threading.Event()
+        self.state = state
+        self.lock = threading.Lock()
+        state.setdefault("started", dt.datetime.now().isoformat(timespec="seconds"))
+        threading.Thread(target=self._watch_stop, daemon=True).start()
+        self.save()
+
+    def _watch_stop(self):
+        while not self.stop.is_set():
+            if os.path.exists(self.stop_path):
+                self.stop.set()
+            time.sleep(1)
+
+    def save(self):
+        with self.lock:
+            self.state["updated"] = dt.datetime.now().isoformat(timespec="seconds")
+            tmp = self.status_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self.state, fh)
+            os.replace(tmp, self.status_path)
+
+    def finish(self):
+        for f in (self.stop_path, self.job_path):  # the job file holds the password: remove it
+            if os.path.exists(f):
+                os.remove(f)
+
+
+def _index_piece(store, p: dict, job: dict, cfg: dict, r: dict, clock_start: str | None):
+    """Index one downloaded video into the piece's status."""
     from .pipeline import index_media
+
+    t0 = time.time()
+    res = index_media(store, p["path"], plates=job.get("plates", True), persons=job.get("persons", True), **r,
+                      clock_start=clock_start, min_ocr_conf=cfg["min_ocr_conf"], plate_script=cfg["plate_script"],
+                      car_models=cfg["car_models"], vehicle_crops=cfg["vehicle_crops"],
+                      skip_empty_road=cfg["skip_empty_road"])
+    p["state"] = "done"
+    p["media_id"] = res["media_id"]
+    p["found"] = {k: res[k] for k in ("plates", "persons") if k in res and res[k] >= 0}
+    dur = res["info"].duration if res.get("info") else 0
+    p["indexed_in"] = f"{dur / 60:.0f} min of video in {(time.time() - t0) / 60:.1f} min" if dur else ""
+    if res.get("alerts"):
+        p["alerts"] = len(res["alerts"])
+    if job.get("delete_after"):  # the pictures of the results are kept, so they still show
+        try:
+            os.remove(p["path"])
+            p["note"] = (p.get("note", "") + ", video deleted after indexing").lstrip(", ")
+        except OSError:
+            pass
+
+
+def run_job(db_path: str, job_path: str):
+    """Download and index every piece of a job. Several pieces download at the same time (the
+    DVR's web download is limited per connection) while the finished ones are indexed in order."""
     from .settings import load, rates
     from .store import Store
 
     with open(job_path, encoding="utf-8") as f:
         job = json.load(f)
-    status_path = job_path[:-5] + ".status.json"
-    stop_path = job_path[:-5] + ".stop"
-    stop = threading.Event()
-    state = {"id": job["id"], "name": job["name"], "channels": job["channels"], "from": job["start"], "to": job["end"],
-             "state": "finding recordings", "pieces": [], "started": dt.datetime.now().isoformat(timespec="seconds")}
-    lock = threading.Lock()
-
-    def save():
-        with lock:
-            state["updated"] = dt.datetime.now().isoformat(timespec="seconds")
-            tmp = status_path + ".tmp"
-            with open(tmp, "w", encoding="utf-8") as fh:
-                json.dump(state, fh)
-            os.replace(tmp, status_path)
-
-    def watch_stop():
-        while not stop.is_set():
-            if os.path.exists(stop_path):
-                stop.set()
-            time.sleep(1)
-
-    threading.Thread(target=watch_stop, daemon=True).start()
-    save()
+    if job.get("kind") == "folder":
+        return run_folder(db_path, job_path, job)
+    J = _Job(job_path, {"id": job["id"], "name": job["name"], "channels": job["channels"], "from": job["start"],
+                        "to": job["end"], "state": "finding recordings", "pieces": []})
+    state, stop = J.state, J.stop
     start, end = _parse_t(job["start"]), _parse_t(job["end"])
     plan = []
     for ch in job["channels"]:
@@ -386,71 +486,147 @@ def run_job(db_path: str, job_path: str):
             state.setdefault("notes", []).append(f"Channel {ch}: no recordings in this time.")
     state["pieces"] = plan
     state["state"] = "running" if plan else "nothing to fetch"
-    save()
-    folder = job.get("folder") or os.path.join(os.path.dirname(os.path.abspath(db_path)), "dvr_videos")
-    ready: queue.Queue = queue.Queue(maxsize=1)  # one piece downloaded ahead
+    J.save()
+    folder = job.get("folder") or default_folder(db_path)
+    parallel = max(1, int(job.get("parallel", 2)))
+    meter = Meter()
+    ahead = threading.Semaphore(parallel + 1)  # downloaded but not yet indexed (disk space)
+    done_ev = [threading.Event() for _ in plan]
+    nxt = iter(range(len(plan)))
+    nxt_lock = threading.Lock()
 
     def downloader():
-        for p in plan:
-            if stop.is_set():
-                break
+        while not stop.is_set():
+            with nxt_lock:
+                i = next(nxt, None)
+            if i is None:
+                return
+            while not ahead.acquire(timeout=1):
+                if stop.is_set():
+                    return
+            p = plan[i]
 
             def st_(msg, p=p):
                 p["state"] = msg
-                save()
+                J.save()
 
-            path, how = download_piece(job, p["channel"], _parse_t(p["start"]), _parse_t(p["end"]), folder, stop, st_)
+            path, how = download_piece(job, p["channel"], _parse_t(p["start"]), _parse_t(p["end"]), folder, stop, st_,
+                                       meter)
             if path:
-                p["state"], p["note"], p["path"] = "downloaded", how, path
+                p["state"], p["note"], p["path"] = "downloaded, waiting to be indexed", how, path
             else:
                 p["state"], p["note"] = ("stopped" if stop.is_set() else "failed"), how
-            save()
-            while not stop.is_set():
-                try:
-                    ready.put(p if path else None, timeout=1)
-                    break
-                except queue.Full:
-                    pass
-        ready.put(StopIteration)
+                ahead.release()
+            done_ev[i].set()
+            J.save()
 
-    threading.Thread(target=downloader, daemon=True, name="dvr-download").start()
+    for _ in range(min(parallel, len(plan))):
+        threading.Thread(target=downloader, daemon=True, name="dvr-download").start()
+
+    def speed_line():
+        while not stop.is_set() and state["state"] == "running":
+            got = sum(1 for p in plan if p.get("path") or p["state"] in ("done", "failed"))
+            state["download"] = (f"{got} of {len(plan)} pieces downloaded, {mb(meter.total)} so far, "
+                                 f"{meter.speed() / 1e6:.1f} MB/s now")
+            J.save()
+            time.sleep(3)
+
+    threading.Thread(target=speed_line, daemon=True).start()
     cfg = load()
     r = rates(cfg, job.get("speed", cfg["speed"]))
     store = Store(db_path)
-    while True:
-        try:
-            p = ready.get(timeout=1)
-        except queue.Empty:
+    for i, p in enumerate(plan):
+        while not done_ev[i].wait(1):
             if stop.is_set():
                 break
-            continue
-        if p is StopIteration:
-            break
-        if p is None:
-            continue
-        p["state"] = "indexing"
-        save()
-        try:
-            res = index_media(store, p["path"], plates=job.get("plates", True), persons=job.get("persons", True), **r,
-                              clock_start=p["start"], min_ocr_conf=cfg["min_ocr_conf"],
-                              plate_script=cfg["plate_script"], car_models=cfg["car_models"],
-                              vehicle_crops=cfg["vehicle_crops"], skip_empty_road=cfg["skip_empty_road"])
-            p["state"] = "done"
-            p["media_id"] = res["media_id"]
-            p["found"] = {k: res[k] for k in ("plates", "persons") if k in res and res[k] >= 0}
-            if res.get("alerts"):
-                p["alerts"] = len(res["alerts"])
-            if job.get("delete_after"):  # the pictures of the results are kept, so they still show
-                os.remove(p["path"])
-                p["note"] += ", video deleted after indexing"
-        except Exception as e:  # one bad piece must not stop the rest
-            p["state"], p["note"] = "failed", f"indexing: {e}"
-        save()
         if stop.is_set():
             break
+        if not p.get("path"):
+            continue
+        p["state"] = "indexing"
+        J.save()
+        try:
+            _index_piece(store, p, job, cfg, r, p["start"])
+        except Exception as e:  # one bad piece must not stop the rest
+            p["state"], p["note"] = "failed", f"indexing: {e}"
+        ahead.release()
+        J.save()
     done = sum(p["state"] == "done" for p in plan)
     state["state"] = "stopped" if stop.is_set() else f"finished: {done} of {len(plan)} pieces indexed"
-    save()
-    for f in (stop_path, job_path):  # the job file holds the password: remove it
-        if os.path.exists(f):
-            os.remove(f)
+    state["download"] = f"{mb(meter.total)} downloaded"
+    J.save()
+    J.finish()
+
+
+VIDEO_EXTS = (".mp4", ".avi", ".mkv", ".mov", ".dav", ".h264", ".h265", ".ts", ".ps", ".asf")
+
+
+def clock_from_name(name: str) -> str | None:
+    """The recording time in a downloaded file's name, e.g. 192.168.1.230_01_20261014100000_...mp4,
+    ch01_20261014_100000.mp4 or 2026-10-14 10.00.00.mp4 (None if there is none)."""
+    m = re.search(r"(20\d\d)[-_.]?([01]\d)[-_.]?([0-3]\d)[-_. T]?([0-2]\d)[-_.:]?([0-5]\d)[-_.:]?([0-5]\d)", name)
+    if not m:
+        return None
+    try:
+        return dt.datetime(*map(int, m.groups())).isoformat(sep=" ")
+    except ValueError:
+        return None
+
+
+def run_folder(db_path: str, job_path: str, job: dict):
+    """Index the videos in a folder (e.g. downloaded with the DVR's own web page), oldest name
+    first, and keep watching for new ones until stopped. A file is taken once its size has
+    stopped growing, so files still being downloaded are left alone."""
+    from .settings import load, rates
+    from .store import Store
+
+    J = _Job(job_path, {"id": job["id"], "name": job["name"], "kind": "folder", "folder": job["folder"],
+                        "channels": [], "from": "", "to": "", "state": "running", "pieces": []})
+    state, stop = J.state, J.stop
+    cfg = load()
+    r = rates(cfg, job.get("speed", cfg["speed"]))
+    store = Store(db_path)
+    indexed = {os.path.abspath(m["path"]) for m in store.db.execute("SELECT path FROM media")}
+    sizes: dict[str, int] = {}
+    seen: set[str] = set()
+    while not stop.is_set():
+        try:
+            files = sorted(f for f in os.listdir(job["folder"]) if f.lower().endswith(VIDEO_EXTS))
+        except OSError as e:
+            state["state"] = f"cannot read the folder: {e}"
+            J.save()
+            break
+        todo = []
+        for f in files:
+            path = os.path.abspath(os.path.join(job["folder"], f))
+            if path in seen or path in indexed:
+                continue
+            size = os.path.getsize(path)
+            if sizes.get(path) == size and size > 0:  # finished downloading
+                todo.append(path)
+            sizes[path] = size
+        waiting = sum(1 for f in files if os.path.abspath(os.path.join(job["folder"], f)) not in seen | indexed)
+        state["download"] = (f"{waiting} new file(s) in the folder" if waiting else "no new files") + (
+            ", watching for more" if job.get("watch") else "")
+        J.save()
+        for path in todo:
+            if stop.is_set():
+                break
+            seen.add(path)
+            clock = clock_from_name(os.path.basename(path))
+            p = {"file": os.path.basename(path), "path": path, "start": clock or "", "end": "", "channel": "",
+                 "state": "indexing", "note": "" if clock else "no time in the file name: times are from the video start"}
+            state["pieces"].append(p)
+            J.save()
+            try:
+                _index_piece(store, p, job, cfg, r, clock)
+            except Exception as e:
+                p["state"], p["note"] = "failed", f"indexing: {e}"
+            J.save()
+        if not todo and not job.get("watch") and waiting == 0:
+            break
+        stop.wait(5)
+    done = sum(p["state"] == "done" for p in state["pieces"])
+    state["state"] = "stopped" if stop.is_set() else f"finished: {done} file(s) indexed"
+    J.save()
+    J.finish()

@@ -84,6 +84,10 @@ CREATE TABLE IF NOT EXISTS cameras (        -- live cameras (RTSP), recorded in 
     plates INTEGER DEFAULT 1, persons INTEGER DEFAULT 1, enabled INTEGER DEFAULT 1,
     status TEXT, last_seen TEXT
 );
+CREATE TABLE IF NOT EXISTS dvrs (           -- DVR / NVR logins saved in the DVR footage tab
+    name TEXT PRIMARY KEY, make TEXT, ip TEXT, user TEXT, password TEXT,
+    http_port INTEGER DEFAULT 80, rtsp_port INTEGER DEFAULT 554
+);
 CREATE TABLE IF NOT EXISTS person_dets (
     id INTEGER PRIMARY KEY,
     media_id INTEGER NOT NULL REFERENCES media(id),
@@ -353,6 +357,18 @@ class Store:
                               (name, url, int(plates), int(persons)))
         self.db.commit()
         return cur.lastrowid
+
+    def save_dvr(self, name, make, ip, user, password, http_port=80, rtsp_port=554):
+        self.db.execute("INSERT OR REPLACE INTO dvrs VALUES (?,?,?,?,?,?,?)",
+                        (name, make, ip, user, password, int(http_port), int(rtsp_port)))
+        self.db.commit()
+
+    def dvrs(self):
+        return self.db.execute("SELECT * FROM dvrs ORDER BY name").fetchall()
+
+    def remove_dvr(self, name):
+        self.db.execute("DELETE FROM dvrs WHERE name=?", (name,))
+        self.db.commit()
 
     def cameras(self, enabled_only: bool = False):
         q = "SELECT * FROM cameras" + (" WHERE enabled=1" if enabled_only else "") + " ORDER BY id"

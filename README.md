@@ -207,8 +207,16 @@ added there), pick the channels, a date and a time range, and click **Download a
   real time. If the DVR refuses it, RTSP playback is copied instead (real-time speed only).
 * It runs in its own background process, so it continues when the page is closed. Progress and a
   Stop button are under **Downloads** in the same tab.
-* Videos go to `dvr_videos/`. Tick **Delete each video after indexing** to save disk space: the
-  pictures of plates and faces are kept, so results still show.
+* Several pieces download at the same time (**Download at the same time**, 2 by default); each piece
+  shows its size, MB/s and time left, and the job shows the total speed.
+* **Save downloads in** picks the folder (default `dvr_videos/`). Tick **Delete each video after
+  indexing** to save disk space: the pictures of plates and faces are kept, so results still show.
+  **Delete indexed DVR downloads** (here and in Settings > Storage) removes older downloads.
+* **Save these DVR details** keeps the DVR's name, address and login; pick it next time under
+  **Saved DVR / NVR**.
+* **Index videos downloaded with the DVR's own web page**: point it at the folder you download into;
+  every video is indexed, and with **Keep watching** each new file as soon as its download finishes.
+  The time in the file name is used as the clock time.
 
 ## Command line
 

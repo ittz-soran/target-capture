@@ -78,3 +78,28 @@ def test_dahua_channels():
 def test_no_dvr():
     chans, why = dvr.list_channels("Hikvision / HiLook", "127.0.0.1", "admin", "x", 1)
     assert chans is None and "web port" in why
+
+
+def test_page_lists_dvrs_then_cameras(tmp_path, monkeypatch):
+    import os
+
+    import pytest
+
+    pytest.importorskip("streamlit")
+    from streamlit.testing.v1 import AppTest
+
+    from targetcapture.store import Store
+
+    srv = serve(HIK)
+    monkeypatch.chdir(tmp_path)
+    Store("targetcapture.db").save_dvr("Home DVR", "Hikvision / HiLook", "127.0.0.1", "admin", "x",
+                                       srv.server_port, 554)
+    app = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "app.py")
+    try:
+        at = AppTest.from_file(app, default_timeout=120).run()
+    finally:
+        srv.shutdown()
+    assert not at.exception
+    heads = [h.value for h in at.subheader]
+    assert "Your DVRs / NVRs" in heads and "Cameras on Home DVR (DS-7608NI-K2)" in heads
+    assert [m for m in at.multiselect if m.label == "Channels"][0].options[:3] == ["1 · Gate", "2 · Back", "3 · Street"]

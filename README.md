@@ -200,6 +200,10 @@ plus `results.csv` (opens in Excel) and `results.json`.
 Tab **DVR footage**: type the DVR's address and login (filled in from Live cameras when a camera is
 added there), pick the channels, a date and a time range, and click **Download and index**.
 
+* **List the DVR's cameras** reads the cameras set up in the DVR / NVR itself (its Camera
+  Management page): channel, name, online / offline / no video, analog or IP, and for IP cameras
+  their IP address, port, model, protocol, serial number and firmware. The channel picker then shows
+  the names; click a row to show that camera's details and download only its channel.
 * **Check what is recorded** asks the DVR which minutes have recordings, so empty hours are skipped.
 * The range is cut into pieces (10 minutes by default). The next piece downloads while one is
   indexed, and each piece is searchable as soon as it is done, with the DVR's own clock time.

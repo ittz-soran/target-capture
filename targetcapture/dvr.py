@@ -109,6 +109,112 @@ def find_recordings(make: str, ip: str, user: str, password: str, channel: int, 
         return None
 
 
+def _xml_blocks(text: str, tag: str) -> list[str]:
+    return re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", text, re.S)
+
+
+def _xml(block: str, tag: str) -> str:
+    m = re.search(rf"<{tag}\b[^>]*>([^<]*)</{tag}>", block)
+    return m.group(1).strip() if m else ""
+
+
+def _kv(text: str) -> dict[str, str]:
+    """Dahua answers as key=value lines."""
+    return dict(ln.strip().split("=", 1) for ln in text.splitlines() if "=" in ln)
+
+
+def list_channels(make: str, ip: str, user: str, password: str, http_port: int = 80
+                  ) -> tuple[list[dict] | None, str]:
+    """The cameras / channels the DVR / NVR has in its own channel settings (what its
+    Camera Management page shows), as (channels, device model) or (None, reason).
+    Each channel: channel, name, kind (IP / analog), ip, port, protocol, model, serial,
+    firmware, status, resolution."""
+    import requests
+
+    base, auth = f"http://{ip}:{http_port}", _auth(user, password)
+
+    def get(path):
+        r = requests.get(base + path, auth=auth, timeout=10)
+        if r.status_code == 401:
+            raise PermissionError("wrong user name or password")
+        return r.text if r.status_code == 200 else ""
+
+    try:
+        return (_hik_channels if is_hik(make) else _dahua_channels)(get)
+    except PermissionError as e:
+        return None, str(e)
+    except requests.RequestException:
+        return None, f"no answer on web port {http_port}: check the IP address and the web port"
+
+
+def _hik_channels(get) -> tuple[list[dict] | None, str]:
+    info = get("/ISAPI/System/deviceInfo")
+    model = _xml(info, "model")
+    out: dict[int, dict] = {}
+    # analog (Turbo HD) inputs of a DVR
+    for b in _xml_blocks(get("/ISAPI/System/Video/inputs/channels"), "VideoInputChannel"):
+        ch = int(_xml(b, "id") or 0)
+        res = _xml(b, "resDesc")
+        on = _xml(b, "videoInputEnabled").lower() != "false"
+        out[ch] = {"channel": ch, "name": _xml(b, "name"), "kind": "analog", "ip": "", "port": "",
+                   "protocol": _xml(b, "videoFormat"), "model": "", "serial": "", "firmware": "",
+                   "status": "off" if not on else ("no video" if "no video" in res.lower() else "online"),
+                   "resolution": "" if "no video" in res.lower() else res}
+    # IP cameras added to an NVR (or a hybrid DVR); their channel numbers follow the analog ones
+    for b in _xml_blocks(get("/ISAPI/ContentMgmt/InputProxy/channels"), "InputProxyChannel"):
+        ch = int(_xml(b, "id") or 0)
+        src = (_xml_blocks(b, "sourceInputPortDescriptor") or [""])[0]
+        out[ch] = {"channel": ch, "name": _xml(b, "name"), "kind": "IP",
+                   "ip": _xml(src, "ipAddress") or _xml(src, "hostName"), "port": _xml(src, "managePortNo"),
+                   "protocol": _xml(src, "proxyProtocol"), "model": _xml(src, "model"),
+                   "serial": _xml(src, "serialNumber"), "firmware": _xml(src, "firmwareVersion"),
+                   "status": "", "resolution": ""}
+    for b in _xml_blocks(get("/ISAPI/ContentMgmt/InputProxy/channels/status"), "InputProxyChannelStatus"):
+        ch = int(_xml(b, "id") or 0)
+        if ch in out:
+            online = _xml(b, "online").lower() == "true"
+            out[ch]["status"] = "online" if online else ("offline: " + _xml(b, "chanDetectResult")).rstrip(": ")
+            out[ch]["model"] = out[ch]["model"] or _xml(b, "model")
+    if not out and not info:
+        return None, "the DVR did not answer the channel questions (is the make right?)"
+    return sorted(out.values(), key=lambda c: c["channel"]), model
+
+
+def _dahua_channels(get) -> tuple[list[dict] | None, str]:
+    model = _kv(get("/cgi-bin/magicBox.cgi?action=getDeviceType")).get("type", "")
+    titles = {int(m.group(1)) + 1: v for k, v in _kv(get("/cgi-bin/configManager.cgi?action=getConfig&name=ChannelTitle"))
+              .items() if (m := re.match(r"table\.ChannelTitle\[(\d+)\]\.Name$", k))}
+    out = {ch: {"channel": ch, "name": n, "kind": "analog", "ip": "", "port": "", "protocol": "", "model": "",
+                "serial": "", "firmware": "", "status": "", "resolution": ""} for ch, n in titles.items()}
+    cams: dict[str, dict] = {}
+    for k, v in _kv(get("/cgi-bin/LogicDeviceManager.cgi?action=getCameraAll")).items():
+        m = re.match(r"camera\[(\d+)\]\.(.+)$", k)
+        if m:
+            cams.setdefault(m.group(1), {})[m.group(2)] = v
+    for c in cams.values():
+        if "Channel" not in c:
+            continue
+        ch = int(c["Channel"]) + 1
+        row = out.setdefault(ch, {"channel": ch, "name": "", "kind": "", "ip": "", "port": "", "protocol": "",
+                                  "model": "", "serial": "", "firmware": "", "status": "", "resolution": ""})
+        addr = c.get("DeviceInfo.Address", "")
+        row.update({"kind": "IP" if addr else "analog", "ip": addr, "port": c.get("DeviceInfo.Port", ""),
+                    "protocol": c.get("DeviceInfo.ProtocolType", ""), "model": c.get("DeviceInfo.DeviceType", ""),
+                    "serial": c.get("DeviceInfo.SerialNo", ""), "firmware": c.get("DeviceInfo.SoftwareVersion", "")})
+        row["name"] = row["name"] or c.get("DeviceInfo.Name", "")
+        if c.get("DeviceInfo.Enable", "true").lower() == "false":
+            row["status"] = "off"
+    states = _kv(get("/cgi-bin/LogicDeviceManager.cgi?action=getCameraState&uniqueChannels[0]=-1"))
+    for k, v in states.items():
+        m = re.match(r"states\[(\d+)\]\.channel$", k)
+        if m and int(v) + 1 in out:
+            st = states.get(f"states[{m.group(1)}].connectionState", "")
+            out[int(v) + 1]["status"] = {"connected": "online", "disconnected": "offline"}.get(st.lower(), st.lower())
+    if not out and not model:
+        return None, "the DVR did not answer the channel questions (is the make right?)"
+    return sorted(out.values(), key=lambda c: c["channel"]), model
+
+
 def recording_files(ip: str, channel: int, start: dt.datetime, end: dt.datetime
                     ) -> list[tuple[dt.datetime, dt.datetime, str]]:
     """The DVR's recording files (from the last search) that overlap start..end, each once."""

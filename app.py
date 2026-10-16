@@ -602,6 +602,41 @@ def dvr_defaults():
     return {"ip": "", "rtsp_port": 554, "user": "admin", "password": "", "make": "Hikvision / HiLook", "name": "DVR"}
 
 
+def dvr_cameras(found, picker_key):
+    """The DVR's own camera list; picking a row points the footage download at that channel."""
+    if not found:
+        return
+    chans, model = found
+    st.subheader("Cameras on this DVR" + (f" ({model})" if model else ""))
+    if not chans:
+        st.info("The DVR answered but has no cameras / channels set up.")
+        return
+    on = sum(c["status"] == "online" for c in chans)
+    st.caption(f"{len(chans)} channel(s), {on} online. Click a row to use only that channel for the download above.")
+    rows = [{"channel": c["channel"], "name": c["name"], "status": c["status"] or "unknown", "type": c["kind"],
+             "IP address": c["ip"], "port": c["port"], "model": c["model"], "protocol": c["protocol"],
+             "resolution": c["resolution"]} for c in chans]
+    table_key = "dvr_cam_table_" + picker_key
+
+    def focus():
+        sel = st.session_state[table_key].selection.rows
+        if sel:
+            st.session_state[picker_key] = [chans[sel[0]]["channel"]]
+
+    ev = st.dataframe(rows, hide_index=True, width="stretch", on_select=focus, selection_mode="single-row",
+                      key=table_key, column_config={"channel": st.column_config.NumberColumn(width="small")})
+    if ev.selection.rows:
+        c = chans[ev.selection.rows[0]]
+        st.markdown(f"**Channel {c['channel']} · {c['name'] or 'no name'}**: {c['status'] or 'status unknown'}")
+        facts = {"Type": "IP camera" if c["kind"] == "IP" else "analog camera", "IP address": c["ip"],
+                 "Port": c["port"], "Protocol": c["protocol"] if c["kind"] == "IP" else "",
+                 "Video format": c["protocol"] if c["kind"] != "IP" else "", "Model": c["model"],
+                 "Serial number": c["serial"], "Firmware": c["firmware"], "Resolution": c["resolution"]}
+        st.caption(" · ".join(f"{k_}: {v}" for k_, v in facts.items() if v))
+        st.caption("The Channels box above now holds only this channel: pick the time and click "
+                   "Check what is recorded or Download and index.")
+
+
 with tab_dvr:
     from targetcapture import dvr as D
 
@@ -622,12 +657,19 @@ with tab_dvr:
         dd = {**dvr_defaults(), "http_port": 80}
     k = f"_{pick}"  # the fields refresh when another saved DVR is picked
     makes = ["Hikvision / HiLook", "Dahua / Imou"]
+    cams_seen = st.session_state.setdefault("dvr_cams", {})  # ip -> (channels, model) from "List the cameras"
+    from targetcapture.live import clean_host
+
+    typed_ip = clean_host(st.session_state.get("di" + k, dd["ip"]))[0].strip()
+    ch_names = {c["channel"]: c["name"] for c in (cams_seen.get(typed_ip) or ([], ""))[0] if c["name"]}
+    st.session_state.setdefault("dc" + k, [1])
     with st.form("dvr_fetch"):
         a1, a2, a3, a4 = st.columns(4)
         f_name = a1.text_input("Name", dd["name"], key="dn" + k)
         f_ip = a2.text_input("IP address", dd["ip"], placeholder="192.168.1.230", key="di" + k)
         f_make = a3.selectbox("Make", makes, index=makes.index(dd["make"]) if dd["make"] in makes else 0, key="dm" + k)
-        f_ch = a4.multiselect("Channels", list(range(1, 65)), [1])
+        f_ch = a4.multiselect("Channels", list(range(1, 65)), key="dc" + k,
+                              format_func=lambda c: f"{c} · {ch_names[c]}" if c in ch_names else str(c))
         b1, b2, b3, b4 = st.columns(4)
         f_user = b1.text_input("User name", dd["user"], key="du" + k)
         f_pass = b2.text_input("Password", dd["password"], type="password", key="dp" + k)
@@ -661,15 +703,30 @@ with tab_dvr:
         f_folder = st.text_input("Save downloads in", CFG["dvr_folder"] or D.default_folder(db_path),
                                  help="Any folder on this PC or a USB / network drive, e.g. D:\\DVR downloads")
         f_save = st.checkbox("Save these DVR details (name, address, login) for next time", pick not in saved)
-        g1, g2 = st.columns([1, 1])
-        check = g1.form_submit_button("Check what is recorded")
-        go = g2.form_submit_button("Download and index", type="primary")
+        g1, g2, g3 = st.columns([1, 1, 1])
+        list_cams = g1.form_submit_button("List the DVR's cameras",
+                                          help="Read the cameras / channels set up in the DVR / NVR itself.")
+        check = g2.form_submit_button("Check what is recorded")
+        go = g3.form_submit_button("Download and index", type="primary")
     start_t, end_t = dt.datetime.combine(d_from, t_from), dt.datetime.combine(d_to, t_to)
     from targetcapture.live import clean_host
 
     f_ip, typed_port = clean_host(f_ip)  # also takes a pasted web address like http://192.168.1.230/
     if typed_port and typed_port != int(f_rtsp):  # a web-page address with its port
         f_http = typed_port
+    if list_cams:
+        if not f_ip.strip() or not f_pass:
+            st.error("Type the IP address and password.")
+        else:
+            with st.spinner("Asking the DVR for its cameras…"):
+                chans, why = D.list_channels(f_make, f_ip.strip(), f_user, f_pass, int(f_http))
+            if chans is None:
+                st.error(f"Could not read the camera list: {why}.")
+            else:
+                cams_seen[f_ip.strip()] = (chans, why)
+                if f_save:
+                    store.save_dvr(f_name.strip() or "DVR", f_make, f_ip, f_user, f_pass, f_http, f_rtsp)
+                st.rerun()  # the channel picker shows the camera names
     if (check or go) and (not f_ip.strip() or not f_pass or not f_ch or end_t <= start_t):
         st.error("Type the IP address and password, pick at least one channel, and an end after the start.")
     elif check or go:
@@ -706,6 +763,7 @@ with tab_dvr:
             start_fetch(D.new_job(db_path, job))
             st.success("Started. Progress shows below.")
 
+    dvr_cameras(cams_seen.get(f_ip.strip()), "dc" + k)
     delete_downloads_button("del_dl_tab")
     with st.expander("Index videos downloaded with the DVR's own web page"):
         st.caption("If you download with the DVR / NVR's web page, save the files into one folder and start this: "

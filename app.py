@@ -736,7 +736,7 @@ with tab_dvr:
             ps = j.get("pieces", [])
             done = sum(p["state"] == "done" for p in ps)
             running = j["state"] in ("running", "finding recordings")
-            stale = running and (dt.datetime.now() - dt.datetime.fromisoformat(j["updated"])).total_seconds() > 600
+            stale = D.is_stale(j)
             if j.get("kind") == "folder":
                 what = f"**Folder {j['folder']}** · {done} file(s) indexed · "
             else:
@@ -746,8 +746,9 @@ with tab_dvr:
             h1.markdown(what + ("stopped unexpectedly" if stale else j["state"]))
             if running and not stale and h2.button("Stop", key=f"stop_{j['id']}"):
                 open(j["_path"].replace(".status.json", ".stop"), "w").close()
-            if not running and h2.button("Clear", key=f"clear_{j['id']}", help="Remove this line (results stay)."):
-                os.remove(j["_path"])
+            if (not running or stale) and h2.button("Clear", key=f"clear_{j['id']}",
+                                                     help="Remove this line (indexed results stay)."):
+                D.remove_job(j["_path"])
                 st.rerun()
             if ps and j.get("kind") != "folder":
                 h1.progress(done / len(ps))
@@ -755,6 +756,9 @@ with tab_dvr:
                 h1.caption(j["download"])
             for n in j.get("notes", []):
                 h1.caption(n)
+            if stale:
+                h1.caption("The download program was closed (window closed, PC restarted or an error, see "
+                           "dvr_fetch.log). Clear this line and start the download again for the pieces not indexed.")
             with st.expander("Pieces" if j.get("kind") != "folder" else "Files", expanded=running and not stale):
                 rows = [{**({"file": p.get("file")} if j.get("kind") == "folder" else
                             {"channel": p["channel"], "from": p["start"][11:16], "to": p["end"][11:16]}),

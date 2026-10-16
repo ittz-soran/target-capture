@@ -152,9 +152,13 @@ def cmd_live(a):
 
 
 def cmd_fetch(a):
-    from .dvr import run_job
+    from .dvr import fail_job, run_job
 
-    run_job(a.db, a.job)
+    try:
+        run_job(a.db, a.job)
+    except BaseException as e:  # show the reason on the page instead of a job stuck at "running"
+        fail_job(a.job, e)
+        raise
 
 
 def cmd_media(a):

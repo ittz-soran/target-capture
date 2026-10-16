@@ -378,6 +378,43 @@ def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime
 # ---- jobs: run in their own process (python -m targetcapture fetch JOB), so they keep going
 #      when the web page is closed. Progress goes to <job>.status.json next to the job file.
 
+HEARTBEAT = 30  # seconds between status saves of a running job
+STALE_AFTER = 180  # a running job whose status is older than this has stopped (closed window, crash, restart)
+
+
+def is_stale(status: dict) -> bool:
+    try:
+        age = (dt.datetime.now() - dt.datetime.fromisoformat(status["updated"])).total_seconds()
+    except (KeyError, ValueError):
+        return True
+    return status.get("state") in ("running", "finding recordings") and age > STALE_AFTER
+
+
+def fail_job(job_path: str, err: BaseException):
+    """Mark a job as failed with the error, and remove its job file (it holds the password)."""
+    status_path = job_path[:-5] + ".status.json"
+    s = read_status(status_path) or {"id": os.path.basename(job_path)[:-5], "name": "DVR", "channels": [],
+                                     "from": "", "to": "", "pieces": []}
+    s["state"] = f"failed: {type(err).__name__}: {err}"[:300]
+    s["updated"] = dt.datetime.now().isoformat(timespec="seconds")
+    with open(status_path, "w", encoding="utf-8") as fh:
+        json.dump(s, fh)
+    for f in (job_path, job_path[:-5] + ".stop"):
+        if os.path.exists(f):
+            os.remove(f)
+
+
+def remove_job(status_path: str):
+    """Delete a job's line; a job that may still be running is told to stop first."""
+    base = status_path[: -len(".status.json")]
+    s = read_status(status_path) or {}
+    if s.get("state") in ("running", "finding recordings"):
+        open(base + ".stop", "w").close()
+    for f in (status_path, base + ".json"):
+        if os.path.exists(f):
+            os.remove(f)
+
+
 def jobs_dir(db_path: str) -> str:
     return os.path.join(os.path.dirname(os.path.abspath(db_path)), "dvr_jobs")
 
@@ -428,9 +465,17 @@ class _Job:
         self.stop = threading.Event()
         self.state = state
         self.lock = threading.Lock()
+        self.closed = threading.Event()
         state.setdefault("started", dt.datetime.now().isoformat(timespec="seconds"))
+        state["pid"] = os.getpid()
         threading.Thread(target=self._watch_stop, daemon=True).start()
+        threading.Thread(target=self._heartbeat, daemon=True).start()
         self.save()
+
+    def _heartbeat(self):
+        """Save every 30 s, also during a long indexing, so the page can tell a stopped job from a slow one."""
+        while not self.closed.wait(HEARTBEAT):
+            self.save()
 
     def _watch_stop(self):
         while not self.stop.is_set():
@@ -447,6 +492,7 @@ class _Job:
             os.replace(tmp, self.status_path)
 
     def finish(self):
+        self.closed.set()
         for f in (self.stop_path, self.job_path):  # the job file holds the password: remove it
             if os.path.exists(f):
                 os.remove(f)

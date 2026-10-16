@@ -90,6 +90,9 @@ def test_page_lists_dvrs_then_cameras(tmp_path, monkeypatch):
 
     from targetcapture.store import Store
 
+    from targetcapture import discover
+
+    monkeypatch.setattr(discover, "search", lambda *a, **k: [])  # no network search in tests
     srv = serve(HIK)
     monkeypatch.chdir(tmp_path)
     Store("targetcapture.db").save_dvr("Home DVR", "Hikvision / HiLook", "127.0.0.1", "admin", "x",

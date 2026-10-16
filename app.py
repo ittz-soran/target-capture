@@ -602,8 +602,8 @@ def dvr_defaults():
     return {"ip": "", "rtsp_port": 554, "user": "admin", "password": "", "make": "Hikvision / HiLook", "name": "DVR"}
 
 
-def known_dvrs() -> dict:
-    """DVRs / NVRs saved in this tab, then the ones added in Live cameras (one per address)."""
+def known_dvrs(found: list[dict], cameras_too: bool = False) -> dict:
+    """DVRs / NVRs found on the network, saved in this tab or added in Live cameras (one per address)."""
     from urllib.parse import unquote, urlparse
 
     out = {d["name"]: {**dict(d), "source": "saved"} for d in store.dvrs()}
@@ -619,9 +619,16 @@ def known_dvrs() -> dict:
             "password": unquote(u.password or ""), "http_port": 80, "rtsp_port": u.port or 554,
             "make": "Dahua / Imou" if "realmonitor" in (u.path + "?" + u.query) else "Hikvision / HiLook",
             "source": "Live cameras"})
-    for n, d in out.items():
-        d["name"] = n
-    return out
+    by_ip = {d["ip"]: d for d in out.values()}
+    for f in found:
+        if f["ip"] in by_ip:
+            by_ip[f["ip"]]["net"] = f
+        elif f["kind"] == "DVR / NVR" or cameras_too:
+            name = f"{f['model'] or f['make']} ({f['ip']})"
+            out[name] = {"name": f["model"] or "DVR", "ip": f["ip"], "user": "admin", "password": "",
+                         "http_port": f["http_port"], "rtsp_port": 554, "make": f["make"],
+                         "source": "found on network", "net": f}
+    return dict(sorted(out.items(), key=lambda nd: "net" not in nd[1]))  # the ones on the network first
 
 
 def dvr_cameras(found, picker_key, title):
@@ -673,8 +680,14 @@ with tab_dvr:
                "time.")
     from targetcapture.live import clean_host
 
+    from targetcapture import discover as F
+
     NEW = "New DVR / NVR"
-    known = known_dvrs()
+    if "dvr_found" not in st.session_state:  # once per visit; "Search the network again" repeats it
+        with st.spinner("Looking for DVRs / NVRs on your network…"):
+            st.session_state["dvr_found"] = F.search(3)
+    found = st.session_state["dvr_found"]
+    known = known_dvrs(found, st.session_state.get("dvr_cams_too", False))
     cams_seen = st.session_state.setdefault("dvr_cams", {})  # "ip:port" -> (channels or None, model or reason)
 
     def at(d):
@@ -694,17 +707,29 @@ with tab_dvr:
 
         def row(n, d):
             chans, model = cams_seen.get(at(d), (None, ""))
-            ok = chans is not None
-            return {"name": n, "make": d["make"], "IP address": d["ip"], "model": model if ok else "",
+            ok, net = chans is not None, d.get("net") or {}
+            return {"name": n, "make": d["make"], "IP address": d["ip"],
+                    "model": (model if ok else "") or net.get("model", ""),
                     "cameras": f"{len(chans)} ({sum(c['status'] == 'online' for c in chans)} online)" if ok
-                    else ("could not read" if at(d) in cams_seen else ""), "from": d["source"]}
+                    else ("could not read" if at(d) in cams_seen else
+                          ("type the password" if not d["password"] else "")),
+                    "on network": "yes" if net else ("not found" if found else ""),
+                    "from": d["source"], "serial / MAC": net.get("serial") or net.get("mac", ""),
+                    "note": net.get("note", "")}
 
         st.dataframe([row(n, d) for n, d in known.items()],
                      hide_index=True, width="stretch", on_select=pick_dvr, selection_mode="single-row",
                      key="dvr_list")
-        st.caption("Click a DVR / NVR to see its cameras. DVRs added in Live cameras show here too.")
+        st.caption(f"{len(found)} device(s) answered on your network (Hikvision SADP, Dahua and ONVIF search). "
+                   "Click a DVR / NVR to see its cameras; a new one asks for its password first.")
     else:
-        st.info("No DVR / NVR yet: type one below and tick 'Save these DVR details', or add it in Live cameras.")
+        st.info("No DVR / NVR answered on this PC's network. Check that this PC is on the same network as the "
+                "DVR, or type its address below.")
+    n1, n2 = st.columns([1, 3])
+    if n1.button("Search the network again", key="dvr_search"):
+        st.session_state.pop("dvr_found", None)
+        st.rerun()
+    n2.checkbox("Also show single IP cameras", key="dvr_cams_too")
     s1, s2, s3 = st.columns([2, 1, 1])
     if pick in known and s2.button("Read the cameras again", key="dvr_reread"):
         cams_seen.pop(at(known[pick]), None)
@@ -717,7 +742,10 @@ with tab_dvr:
 
     if pick in known:
         dd = known[pick]
-        if at(dd) not in cams_seen and dd["password"]:
+        if not dd["password"]:
+            st.info(f"{pick} is on your network. Type its user name and password below and click "
+                    "**List the DVR's cameras**.")
+        elif at(dd) not in cams_seen:
             with st.spinner(f"Asking {pick} for its cameras…"):
                 cams_seen[at(dd)] = D.list_channels(dd["make"], dd["ip"], dd["user"], dd["password"],
                                                       int(dd["http_port"] or 80))

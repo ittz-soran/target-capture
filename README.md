@@ -197,8 +197,11 @@ plus `results.csv` (opens in Excel) and `results.json`.
 
 ### DVR footage: fetch recordings straight from the DVR / NVR
 
-Tab **DVR footage** starts with **Your DVRs / NVRs**: the ones you saved here and the ones added in
-Live cameras, with their make, address, model and how many cameras are online. Click one to see
+Tab **DVR footage** starts with **Your DVRs / NVRs**: the DVRs / NVRs found on this PC's network (the
+same search as Hikvision SADP, Dahua ConfigTool and ONVIF tools; **Search the network again** repeats
+it, **Also show single IP cameras** adds cameras), plus the ones you saved here or added in Live
+cameras, with their make, address, model, serial number and how many cameras are online. A DVR found
+on the network asks for its password once (tick **Save these DVR details**). Click one to see
 **its cameras** (read from the DVR / NVR itself, see below); click a camera to download only its
 channel. **Add a new DVR / NVR** opens an empty form. Then pick the channels, a date and a time range,
 and click **Download and index**.

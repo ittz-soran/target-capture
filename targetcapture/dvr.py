@@ -498,7 +498,47 @@ class _Job:
                 os.remove(f)
 
 
-def _index_piece(store, p: dict, job: dict, cfg: dict, r: dict, clock_start: str | None):
+def _clock(sec: float) -> str:
+    sec = int(max(0, sec))
+    return f"{sec // 3600}:{sec % 3600 // 60:02d}:{sec % 60:02d}" if sec >= 3600 else f"{sec // 60}:{sec % 60:02d}"
+
+
+def _left(sec: float) -> str:
+    return "less than a minute" if sec < 60 else f"{sec / 60:.0f} min" if sec < 5400 else f"{sec / 3600:.1f} h"
+
+
+class _Eta:
+    """Indexing speed and time remaining, for the piece being indexed and for the whole job."""
+
+    def __init__(self, state: dict, save, waiting=lambda: 0.0):
+        self.state, self.save, self.waiting = state, save, waiting
+        self.rate = None  # seconds of video per second, from the pieces indexed so far
+
+    def piece(self, p: dict):
+        t0, seen, last = time.time(), {}, [0.0]
+
+        def progress(kind, i, total, found, t):
+            seen[kind] = (t, i / max(1, total))
+            now = time.time()
+            if now - last[0] < 3 or now - t0 < 10:
+                return
+            last[0] = now
+            t_min, frac = min(v[0] for v in seen.values()), min(v[1] for v in seen.values())
+            if t_min <= 0 or frac <= 0:
+                return
+            self.rate = t_min / (now - t0)
+            dur = t_min / frac
+            left = (dur - t_min) / self.rate
+            p["state"] = f"indexing {_clock(t_min)} of {_clock(dur)}, about {_left(left)} left"
+            total_left = left + self.waiting() / self.rate
+            self.state["indexing"] = (f"Indexing at {self.rate:.1f}x real time (1 h of video in about "
+                                      f"{_left(3600 / self.rate)}). About {_left(total_left)} left for this job.")
+            self.save()
+
+        return progress
+
+
+def _index_piece(store, p: dict, job: dict, cfg: dict, r: dict, clock_start: str | None, progress=None):
     """Index one downloaded video into the piece's status."""
     from .pipeline import index_media
 
@@ -506,7 +546,7 @@ def _index_piece(store, p: dict, job: dict, cfg: dict, r: dict, clock_start: str
     res = index_media(store, p["path"], plates=job.get("plates", True), persons=job.get("persons", True), **r,
                       clock_start=clock_start, min_ocr_conf=cfg["min_ocr_conf"], plate_script=cfg["plate_script"],
                       car_models=cfg["car_models"], vehicle_crops=cfg["vehicle_crops"],
-                      skip_empty_road=cfg["skip_empty_road"])
+                      skip_empty_road=cfg["skip_empty_road"], progress=progress)
     p["state"] = "done"
     p["media_id"] = res["media_id"]
     p["found"] = {k: res[k] for k in ("plates", "persons") if k in res and res[k] >= 0}
@@ -602,6 +642,11 @@ def run_job(db_path: str, job_path: str):
     cfg = load()
     r = rates(cfg, job.get("speed", cfg["speed"]))
     store = Store(db_path)
+
+    def waiting(): return sum((_parse_t(q["end"]) - _parse_t(q["start"])).total_seconds()
+                              for q in plan if q["state"] != "done" and not q["state"].startswith(("indexing", "failed", "stopped")))
+
+    eta = _Eta(state, J.save, waiting)
     for i, p in enumerate(plan):
         while not done_ev[i].wait(1):
             if stop.is_set():
@@ -613,7 +658,7 @@ def run_job(db_path: str, job_path: str):
         p["state"] = "indexing"
         J.save()
         try:
-            _index_piece(store, p, job, cfg, r, p["start"])
+            _index_piece(store, p, job, cfg, r, p["start"], eta.piece(p))
         except Exception as e:  # one bad piece must not stop the rest
             p["state"], p["note"] = "failed", f"indexing: {e}"
         ahead.release()
@@ -653,6 +698,7 @@ def run_folder(db_path: str, job_path: str, job: dict):
     cfg = load()
     r = rates(cfg, job.get("speed", cfg["speed"]))
     store = Store(db_path)
+    eta = _Eta(state, J.save)
     indexed = {os.path.abspath(m["path"]) for m in store.db.execute("SELECT path FROM media")}
     sizes: dict[str, int] = {}
     seen: set[str] = set()
@@ -686,7 +732,7 @@ def run_folder(db_path: str, job_path: str, job: dict):
             state["pieces"].append(p)
             J.save()
             try:
-                _index_piece(store, p, job, cfg, r, clock)
+                _index_piece(store, p, job, cfg, r, clock, eta.piece(p))
             except Exception as e:
                 p["state"], p["note"] = "failed", f"indexing: {e}"
             J.save()

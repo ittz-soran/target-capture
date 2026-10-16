@@ -304,13 +304,20 @@ class PlateIndexer:
             return []
         t0, arabic0 = time.perf_counter(), self.timing.get("Arabic plate check", 0.0)
         reads = self._read(img)
-        if self.vehicle_crops:
-            # Two-stage: also read plates inside each vehicle crop. Helps on wide,
-            # high-resolution views where plates are tiny relative to the frame.
-            for _, (x1, y1, x2, y2), _ in vehicles:
-                for r in self._read(img[y1:y2, x1:x2], x1, y1):
-                    if not any(_iou(r, o) > 0.3 for o in reads):
-                        reads.append(r)
+        # Second look inside vehicles: the plate detector sees the whole frame shrunk to 384 px, so on
+        # wide views a clear plate can score under the detector threshold and be missed altogether
+        # (22F53857 on a 16:9 street view: 0.41 in the whole frame, 0.87 in the car crop). Vehicles
+        # with no plate found get a look of their own; vehicle_crops = every vehicle (slower).
+        fh, fw = img.shape[:2]
+        for _, (x1, y1, x2, y2), _ in vehicles:
+            if not self.vehicle_crops:
+                has_plate = any(x1 <= (r["x1"] + r["x2"]) / 2 <= x2 and y1 <= (r["y1"] + r["y2"]) / 2 <= y2
+                                for r in reads)
+                if has_plate or (x2 - x1) < 0.06 * fw or (x2 - x1) * (y2 - y1) > 0.5 * fw * fh:
+                    continue  # plate already found, too far away to read, or fills the view anyway
+            for r in self._read(img[y1:y2, x1:x2], x1, y1):
+                if not any(_iou(r, o) > 0.3 for o in reads):
+                    reads.append(r)
         _add(self.timing, "plate reader", t0 + self.timing.get("Arabic plate check", 0.0) - arabic0)
         if not reads:
             return []

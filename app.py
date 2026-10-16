@@ -754,6 +754,8 @@ with tab_dvr:
                 h1.progress(done / len(ps))
             if j.get("download"):
                 h1.caption(j["download"])
+            if j.get("indexing") and running and not stale:
+                h1.caption(j["indexing"])
             for n in j.get("notes", []):
                 h1.caption(n)
             if stale:

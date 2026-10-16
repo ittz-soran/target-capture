@@ -59,6 +59,7 @@ def find_recordings(make: str, ip: str, user: str, password: str, channel: int, 
     import requests
 
     base = f"http://{ip}:{http_port}"
+    _URIS.pop((ip, channel), None)
     try:
         if is_hik(make):
             out, pos = [], 0
@@ -108,6 +109,17 @@ def find_recordings(make: str, ip: str, user: str, password: str, channel: int, 
         return None
 
 
+def recording_files(ip: str, channel: int, start: dt.datetime, end: dt.datetime
+                    ) -> list[tuple[dt.datetime, dt.datetime, str]]:
+    """The DVR's recording files (from the last search) that overlap start..end, each once."""
+    seen, out = set(), []
+    for a, b, uri in sorted(_URIS.get((ip, channel), [])):
+        if b > start and a < end and uri not in seen and "name=" in uri:
+            seen.add(uri)
+            out.append((a, b, uri))
+    return out
+
+
 def pieces(start: dt.datetime, end: dt.datetime, minutes: int,
            recorded: list[tuple[dt.datetime, dt.datetime]] | None) -> list[tuple[dt.datetime, dt.datetime]]:
     """Cut start..end into pieces, keeping only the parts with recordings (all, if unknown)."""
@@ -142,11 +154,13 @@ def playback_url(make: str, ip: str, rtsp_port: int, user: str, password: str, c
             f"&starttime={start.strftime(f)}&endtime={end.strftime(f)}")
 
 
-def _hik_requests(ip, channel, start, end):
+def _hik_requests(ip, channel, start, end, exact_uri=None):
     """The forms of the ISAPI download request, most common first (firmware differ)."""
     f = "%Y%m%dT%H%M%SZ"
     uris = [f"rtsp://{ip}/Streaming/tracks/{channel}01/?starttime={start.strftime(f)}&endtime={end.strftime(f)}"]
-    for a, b, uri in _URIS.get((ip, channel), []):  # the recording's own address from the search
+    if exact_uri:  # one whole recording file, exactly as the DVR's search named it
+        uris = [exact_uri.replace("&amp;", "&")]
+    for a, b, uri in ([] if exact_uri else _URIS.get((ip, channel), [])):  # the recording's own address from the search
         if a <= start < b:
             uri = uri.replace("&amp;", "&")
             uri = re.sub(r"starttime=[^&]*", f"starttime={start.strftime(f)}", uri)
@@ -164,13 +178,13 @@ def _hik_requests(ip, channel, start, end):
 
 
 def _http_download(make, ip, http_port, user, password, channel, start, end, path, stop,
-                   progress=lambda got, total: None) -> str:
+                   progress=lambda got, total: None, exact_uri=None) -> str:
     """Download one piece over the DVR's web port. Returns '' when done, else the reason."""
     import requests
 
     base = f"http://{ip}:{http_port}"
     if is_hik(make):
-        tries = _hik_requests(ip, channel, start, end)
+        tries = _hik_requests(ip, channel, start, end, exact_uri)
     else:
         q = (f"action=startLoad&channel={channel}&startTime={quote(start.strftime('%Y-%m-%d %H:%M:%S'), safe=':')}"
              f"&endTime={quote(end.strftime('%Y-%m-%d %H:%M:%S'), safe=':')}&subtype=0")
@@ -188,7 +202,8 @@ def _http_download(make, ip, http_port, user, password, channel, start, end, pat
                         or "xml" in ctype or "text" in ctype else ""
                     why = f"answered {r.status_code}" + (f": {text[:150]}" if text else "")
                     continue
-                total = int(r.headers.get("Content-Length") or 0)
+                m = re.search(r"size=(\d+)", exact_uri or "")
+                total = int(r.headers.get("Content-Length") or (m.group(1) if m else 0))
                 got = 0
                 with open(path, "wb") as fh:
                     for chunk in r.iter_content(256 << 10):
@@ -295,8 +310,8 @@ def mb(n: float) -> str:
 
 
 def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime, folder: str,
-                   stop: threading.Event, status=lambda msg: None, meter: Meter | None = None
-                   ) -> tuple[str | None, str]:
+                   stop: threading.Event, status=lambda msg: None, meter: Meter | None = None,
+                   uri: str | None = None) -> tuple[str | None, str]:
     """Fetch one piece into folder. Returns (path to an .mp4, how) or (None, reason)."""
     meter = meter or Meter()
     last = {"got": 0, "shown": 0.0, "t0": time.time()}
@@ -323,7 +338,7 @@ def download_piece(job: dict, channel: int, start: dt.datetime, end: dt.datetime
     if job.get("method", "auto") in ("auto", "web"):
         ways.append(("web download", lambda: _http_download(
             job["make"], job["ip"], job.get("http_port", 80), job["user"], job["password"], channel, start, end, raw,
-            stop, web_progress)))
+            stop, web_progress, uri)))
     if job.get("method", "auto") in ("auto", "rtsp"):
         url = playback_url(job["make"], job["ip"], job.get("rtsp_port", 554), job["user"], job["password"],
                            channel, start, end)
@@ -479,6 +494,12 @@ def run_job(db_path: str, job_path: str):
     for ch in job["channels"]:
         rec = find_recordings(job["make"], job["ip"], job["user"], job["password"], ch, start, end,
                               job.get("http_port", 80))
+        files = recording_files(job["ip"], ch, start, end) if is_hik(job["make"]) else []
+        if files:  # Hikvision sends whole recording files: fetch each file once, timed from its own start
+            for a, b, uri in files:
+                plan.append({"channel": ch, "start": a.isoformat(sep=" "), "end": b.isoformat(sep=" "), "uri": uri,
+                             "state": "waiting", "note": "whole recording file"})
+            continue
         for a, b in pieces(start, end, job.get("piece_minutes", 10), rec):
             plan.append({"channel": ch, "start": a.isoformat(sep=" "), "end": b.isoformat(sep=" "),
                          "state": "waiting", "note": ""})
@@ -511,7 +532,7 @@ def run_job(db_path: str, job_path: str):
                 J.save()
 
             path, how = download_piece(job, p["channel"], _parse_t(p["start"]), _parse_t(p["end"]), folder, stop, st_,
-                                       meter)
+                                       meter, p.get("uri"))
             if path:
                 p["state"], p["note"], p["path"] = "downloaded, waiting to be indexed", how, path
             else:

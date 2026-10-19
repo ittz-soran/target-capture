@@ -174,6 +174,30 @@ def cached_identities(db, db_mtime, threshold):
     return ppl
 
 
+def plate_data_sig(st_store) -> tuple:
+    """A cheap fingerprint of the plate_reads table, used as the cache key for the grouped
+    sightings below. It changes on any insert, delete, or in-place edit (a Teach correction
+    rewrites `text`/`source`/`conf`), so the cache can never serve stale results."""
+    r = st_store.db.execute(
+        "SELECT COUNT(*), COALESCE(SUM(id), 0), COALESCE(SUM(LENGTH(text)), 0), "
+        "COALESCE(SUM(LENGTH(COALESCE(source, ''))), 0), COALESCE(SUM(conf), 0) FROM plate_reads"
+    ).fetchone()
+    return tuple(r)
+
+
+@st.cache_data(show_spinner="Grouping plate reads…")
+def cached_plate_sightings(db, sig):
+    """Grouped plate sightings, recomputed only when the plate data changes (see plate_data_sig).
+    Repeated searches then reuse one grouping instead of re-grouping the whole index each time."""
+    return L.group_sightings(Store(db).plate_reads())
+
+
+@st.cache_data(show_spinner=False)
+def cached_unread_captures(db, sig):
+    """Grouped unread-plate captures, cached on the same fingerprint as the read sightings."""
+    return L.group_unread(Store(db).plate_reads(unread=True))
+
+
 @st.fragment(run_every=15)
 def alert_banner():
     """New watch-list matches, refreshed every 15 s (live cameras add them while you look)."""
@@ -337,7 +361,12 @@ with tab_index:
         if res.get("timing") and res["info"].kind == "video":
             from targetcapture.pipeline import timing_lines
 
-            speed_line.caption("  \n".join(timing_lines(res["timing"], res["info"].duration)))
+            lines = timing_lines(res["timing"], res["info"].duration)
+            if lines:
+                speed_line.empty()
+                with st.expander("Indexing speed — where the time went (copy this if you want it tuned)",
+                                 expanded=True):
+                    st.code("\n".join(lines))
         if res.get("alerts"):
             st.error(f"{len(res['alerts'])} watch-list match(es) in this video: see the Watch list tab.")
 
@@ -377,7 +406,8 @@ with tab_plate:
             st.session_state.plate_query = (q.strip(), max_dist, min_reads)
     if st.session_state.get("plate_query"):
         q, max_dist, min_reads = st.session_state.plate_query
-        hits = L.search(store, q, max_dist=max_dist, min_reads=min_reads)
+        hits = L.search(store, q, max_dist=max_dist, min_reads=min_reads,
+                        sightings=cached_plate_sightings(db_path, plate_data_sig(store)))
         full = [h for h in hits if not h["partial"]]
         maybe = sorted((h for h in hits if h["partial"]), key=lambda h: (h["distance"], -h["reads"]))
         out = os.path.join(RESULTS, "plate_" + "".join(ch for ch in q if ch.isalnum()))
@@ -1164,7 +1194,7 @@ with tab_all:
     st.subheader("Read plates")
     min_r = st.number_input("Hide plates read fewer times than", 1, 10, 2)
     vfilter = st.text_input("Filter by vehicle (e.g. corolla, white toyota, Erbil)").lower().split()
-    sightings = [s for s in L.group_sightings(store.plate_reads()) if s["reads"] >= min_r and all(
+    sightings = [s for s in cached_plate_sightings(db_path, plate_data_sig(store)) if s["reads"] >= min_r and all(
         w in " ".join(str(s[k] or "") for k in ("vehicle_model", "vehicle_color", "vehicle_type", "region")).lower()
         for w in vfilter)]
     st.caption("Tick **View** to open a plate with its best capture and a second one taken after it.")
@@ -1178,7 +1208,7 @@ with tab_all:
             rows = plate_report(store, "all plates", sightings, out)
         downloads(rows, out, "All plates", "all_plates")
 
-    unread = L.group_unread(store.plate_reads(unread=True))
+    unread = cached_unread_captures(db_path, plate_data_sig(store))
     st.subheader(f"Plates that could not be read ({len(unread)})")
     st.caption("Plates the system found but could not read (other alphabets, blur, too small). "
                "Click one to see the whole frame.")
@@ -1220,10 +1250,11 @@ with tab_teach:
                     format_func=lambda m: {"unread": "Plates it could not read",
                                            "check": "Check read plates (least sure first)",
                                            "find": "Correct a specific plate"}[m])
+    sig = plate_data_sig(store)
     if mode == "unread":
-        queue = L.group_unread(store.plate_reads(unread=True))
+        queue = list(cached_unread_captures(db_path, sig))
     else:
-        queue = [s for s in L.group_sightings(store.plate_reads()) if s["source"] != "taught"]
+        queue = [s for s in cached_plate_sightings(db_path, sig) if s["source"] != "taught"]
         if mode == "find":
             q = st.text_input("Plate as the system shows it (from the All plates table)", key="teach_find")
             queue = [s for s in queue if q and L.match_score(q, s["text"], 1)[0]]
@@ -1241,8 +1272,8 @@ with tab_teach:
                     last["same_mistake"] = []
                     st.rerun()
             if last["sig"] is not None and last["label"]:
-                pool = L.group_unread(store.plate_reads(unread=True)) + [
-                    s for s in L.group_sightings(store.plate_reads()) if s["source"] is None and s["conf"] < 0.9]
+                pool = list(cached_unread_captures(db_path, sig)) + [
+                    s for s in cached_plate_sightings(db_path, sig) if s["source"] is None and s["conf"] < 0.9]
                 sims = T.similar_captures(store, last["sig"], pool)[:12]
                 if sims:
                     st.markdown(f"These look like the same plate. Tick the ones that are **{last['label']}**:")

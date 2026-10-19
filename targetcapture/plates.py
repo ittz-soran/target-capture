@@ -315,7 +315,18 @@ class PlateIndexer:
                                 for r in reads)
                 if has_plate or (x2 - x1) < 0.06 * fw or (x2 - x1) * (y2 - y1) > 0.5 * fw * fh:
                     continue  # plate already found, too far away to read, or fills the view anyway
-            for r in self._read(img[y1:y2, x1:x2], x1, y1):
+            crop = img[y1:y2, x1:x2]
+            # A vehicle can be small in a wide / 4K frame even when its plate is sharp. The plate
+            # detector shrinks its input to 384 px, so upscale a small crop first: the plate then
+            # fills more of that input and is far more likely to be detected. Crops already at least
+            # that wide are read unchanged (so this never alters the previous behaviour on them).
+            sc = 1.0
+            cw = x2 - x1
+            if 0 < cw < _CROP_TARGET:
+                sc = min(_CROP_MAX_SCALE, _CROP_TARGET / cw)
+                crop = cv2.resize(crop, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC)
+            for r in self._read(crop):
+                _remap(r, sc, x1, y1)
                 if not any(_iou(r, o) > 0.3 for o in reads):
                     reads.append(r)
         _add(self.timing, "plate reader", t0 + self.timing.get("Arabic plate check", 0.0) - arabic0)
@@ -400,6 +411,21 @@ class _BoxTracker:
             self.live[ids[d]] = (vtype, b, t)
             out.append((vtype, b, ids[d]))
         return out
+
+
+_CROP_TARGET = 384       # width (px) a vehicle crop is upscaled to for the second-look plate read
+_CROP_MAX_SCALE = 3.0    # never upscale a crop more than this (beyond it there is no real detail)
+
+
+def _remap(r: dict, sc: float, ox: int, oy: int) -> dict:
+    """Map a read's box from an upscaled vehicle crop (scale `sc`, crop origin ox,oy in the full
+    frame) back to full-frame pixel coordinates. sc=1.0 is the plain offset used for crops read at
+    their native size, so it reproduces the earlier `_read(crop, ox, oy)` behaviour exactly."""
+    r["x1"] = int(r["x1"] / sc) + ox
+    r["y1"] = int(r["y1"] / sc) + oy
+    r["x2"] = int(r["x2"] / sc) + ox
+    r["y2"] = int(r["y2"] / sc) + oy
+    return r
 
 
 def _iou(a, b):
@@ -621,10 +647,14 @@ def match_score(query: str, plate: str, max_dist: int) -> tuple[bool, int]:
     return d <= max_dist, d
 
 
-def search(store, query: str, max_dist: int = 1, gap: float = 4.0, min_reads: int = 1) -> list[dict]:
-    reads = store.plate_reads()
+def search(store, query: str, max_dist: int = 1, gap: float = 4.0, min_reads: int = 1,
+           sightings: list[dict] | None = None) -> list[dict]:
+    """Find sightings matching `query`. Pass `sightings` (already grouped, e.g. a cached list)
+    to skip re-grouping; it is never mutated — matches are returned as copies with the extra
+    distance/exact/partial fields."""
+    groups = sightings if sightings is not None else group_sightings(store.plate_reads(), gap=gap)
     hits = []
-    for s in group_sightings(reads, gap=gap):
+    for s in groups:
         if s["reads"] < min_reads:
             continue
         best_d = None
@@ -633,6 +663,7 @@ def search(store, query: str, max_dist: int = 1, gap: float = 4.0, min_reads: in
             if ok and (best_d is None or d < best_d):
                 best_d = d
         if best_d is not None:
+            s = dict(s)  # copy: never annotate a (possibly cached) sighting in place
             s["distance"] = best_d
             s["exact"] = normalize(query).replace(" ", "") == s["text"].replace(" ", "")
             s["partial"] = len(fold(query)) < len(fold(s["text"])) and "*" not in query

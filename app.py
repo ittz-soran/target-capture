@@ -282,8 +282,8 @@ def live_view():
             c2.markdown(f"Person {r['track_id']}  \n{names[r['media_id']]} · "
                         f"{clock_time(media[r['media_id']], r['t'])[11:]}")
 
-(tab_index, tab_dvr, tab_plate, tab_person, tab_car, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
- tab_tips, tab_settings) = st.tabs(["1 · Upload & index", "DVR footage", "2 · Find a plate", "3 · Find a person", "4 · Find a car",
+(tab_index, tab_dvr, tab_search, tab_watch, tab_cams, tab_faces, tab_all, tab_teach,
+ tab_tips, tab_settings) = st.tabs(["Upload & index", "DVR footage", "Search",
                       "Watch list", "Live cameras", "All faces", "All plates", "Teach", "Best results", "Settings"])
 
 with tab_index:
@@ -396,7 +396,7 @@ def view_plate(s, key):
     show_rows(rows, out, ["plate_image", "second_plate_image"])
 
 
-with tab_plate:
+def _search_plate():
     with st.form("plate_search"):
         q = st.text_input("Plate number: all of it or any part (21L1 finds 21L10415); wildcards: 12?BC*")
         c1, c2 = st.columns(2)
@@ -426,7 +426,7 @@ with tab_plate:
         elif not rows:
             st.info("No plate found. Try fewer characters, or allow more differences.")
 
-with tab_person:
+def _search_person():
     photos = st.file_uploader("Photo(s) of the person's face", type=["jpg", "jpeg", "png", "webp"],
                               accept_multiple_files=True)
     threshold = st.slider("Match threshold (higher = stricter)", 0.25, 0.7, 0.40, 0.01)
@@ -451,7 +451,7 @@ with tab_person:
         downloads(rows, out, "Person search", "person_search")
         show_rows(rows, out, ["face_image"])
 
-with tab_car:
+def _search_vehicle():
     st.caption("Every vehicle the plate indexing saw, also when its plate could not be read. "
                "Leave a filter empty to ignore it.")
     c1, c2, c3 = st.columns(3)
@@ -477,6 +477,15 @@ with tab_car:
         rows = vehicle_report(store, found[:200], out)
         downloads(rows, out, "Vehicle search", "vehicle_search")
         show_rows(rows, out, ["vehicle_image"])
+
+
+with tab_search:
+    kind = st.radio("What are you looking for?", ["Plate", "Person", "Vehicle"], horizontal=True,
+                    key="search_kind", label_visibility="collapsed")
+    st.caption({"Plate": "Find a vehicle by its number plate, or any part of it.",
+                "Person": "Find someone from a face photo across every indexed video.",
+                "Vehicle": "Browse and filter every vehicle seen, by make, colour, type or time."}[kind])
+    {"Plate": _search_plate, "Person": _search_person, "Vehicle": _search_vehicle}[kind]()
 
 with tab_watch:
     st.caption("Wanted plates and people. Every new video and every live-camera minute is checked "

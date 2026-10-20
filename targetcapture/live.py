@@ -64,7 +64,47 @@ def _ffmpeg_reason(stderr: bytes | None) -> str:
     return text[-400:]
 
 
-def test_camera(url: str, timeout: float = 15, transport: str = "tcp") -> tuple[bool, str, bytes | None]:
+def request_keyframe(url: str, http_port: int = 80) -> bool:
+    """Ask a Hikvision DVR / camera for a key frame now on this stream. H.265 / H.265+ streams can go
+    many seconds between key frames, and nothing can be decoded before one arrives."""
+    from urllib.parse import unquote, urlparse
+
+    u = urlparse(url)
+    m = re.search(r"/Streaming/Channels/(\d+)", u.path or "")
+    if not m or not u.hostname:
+        return False
+    try:
+        import requests
+        from requests.auth import HTTPDigestAuth
+
+        r = requests.put(f"http://{u.hostname}:{http_port or 80}/ISAPI/Streaming/channels/{m.group(1)}/requestKeyFrame",
+                         auth=HTTPDigestAuth(unquote(u.username or ""), unquote(u.password or "")), timeout=3)
+        return r.status_code == 200
+    except Exception:
+        return False
+
+
+def _keep_asking_keyframe(url: str, http_port: int, done) -> threading.Thread | None:
+    """While connecting, ask for a key frame after 1 s and then every 3 s until done() is true."""
+    if not re.search(r"/Streaming/Channels/\d+", url):
+        return None
+
+    def kick():
+        time.sleep(1)
+        while not done():
+            request_keyframe(url, http_port)
+            for _ in range(30):
+                if done():
+                    return
+                time.sleep(0.1)
+
+    t = threading.Thread(target=kick, daemon=True)
+    t.start()
+    return t
+
+
+def test_camera(url: str, timeout: float = 15, transport: str = "tcp",
+                http_port: int = 80) -> tuple[bool, str, bytes | None]:
     """Grab one picture from the camera: (ok, message, jpeg)."""
     exe = ffmpeg_exe()
     if not exe:
@@ -72,15 +112,20 @@ def test_camera(url: str, timeout: float = 15, transport: str = "tcp") -> tuple[
     cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "warning", *_input_args(url, transport),
            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=flags)
+    _keep_asking_keyframe(url, http_port, lambda: proc.poll() is not None)
     try:
-        r = subprocess.run(cmd, capture_output=True, timeout=timeout, creationflags=flags)
-    except subprocess.TimeoutExpired as e:
-        why = _ffmpeg_reason(e.stderr)
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        out, err = proc.communicate()
+        why = _ffmpeg_reason(err)
         return False, f"no picture within {timeout:g} s" + (f" (ffmpeg: {why})" if why else
                                                            " (connected, but no video came)"), None
-    if r.returncode or not r.stdout:
-        return False, _ffmpeg_reason(r.stderr) or "could not read the stream", None
-    return True, "connected", r.stdout
+    if proc.returncode or not out:
+        return False, _ffmpeg_reason(err) or "could not read the stream", None
+    return True, "connected", out
 
 
 def sub_stream(path: str) -> str:
@@ -329,6 +374,7 @@ class StreamReader(threading.Thread):
         self.proc: subprocess.Popen | None = None
         self.err: list[str] = []
         self.transport = "tcp"  # switches to udp (and back) when a DVR sends nothing over tcp
+        self.http_port = 80  # where a Hikvision DVR answers key-frame requests
 
     def take(self):
         """The newest picture not taken yet, or None."""
@@ -371,6 +417,9 @@ class StreamReader(threading.Thread):
             self.proc = proc = subprocess.Popen(self._command(exe), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                                 stderr=subprocess.PIPE, creationflags=flags, bufsize=0)
             threading.Thread(target=self._read_errors, args=(proc, size), daemon=True).start()
+            first = [False]  # H.265+ may not send a key frame for a long time: ask for one
+            _keep_asking_keyframe(self.url, self.http_port, lambda: first[0] or proc.poll() is not None
+                                  or self.stop_ev.is_set())
             t0 = time.time()
             while not size and proc.poll() is None and time.time() - t0 < 30 and not self.stop_ev.is_set():
                 time.sleep(0.05)
@@ -396,10 +445,11 @@ class StreamReader(threading.Thread):
                         break
                     last[0] = time.time()
                     if not got:
-                        got, self.status = True, "live"
+                        got, self.status, first[0] = True, "live", True
                     img = np.frombuffer(buf, np.uint8).reshape(h, w, 3)
                     with self.lock:
                         self.latest = (img, time.time())
+            first[0] = True
             self._kill(proc)
             if not got and self.url.lower().startswith("rtsp"):
                 self.transport = "udp" if self.transport == "tcp" else "tcp"

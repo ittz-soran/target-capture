@@ -819,7 +819,8 @@ def live_dvr_picker(cams):
                 if how == "sub stream" and p_(first) == path(first):
                     continue
                 st.write(f"Getting a picture from the {how} (up to {secs} s)…")
-                ok, msg, jpg = test_camera(stream_url(d["ip"], port, p_(first), user, pw), secs, transport)
+                ok, msg, jpg = test_camera(stream_url(d["ip"], port, p_(first), user, pw), secs, transport,
+                                           http_port=int(d["http_port"] or 80))
                 notes.append(f"{how} ({p_(first)}): {msg}")
                 st.write(msg)
                 if ok:

@@ -72,7 +72,7 @@ def _live_picker_app(tmp_path, monkeypatch, picture):
     monkeypatch.setattr(LV, "rtsp_describe", lambda ip, port, path, u, p, timeout=6:
                         (200, "") if path.startswith("/Streaming/Channels/") else (404, ""))
     jpg = cv2.imencode(".jpg", np.zeros((90, 160, 3), np.uint8))[1].tobytes()
-    monkeypatch.setattr(LV, "test_camera", lambda url, timeout=15, transport="tcp":
+    monkeypatch.setattr(LV, "test_camera", lambda url, timeout=15, transport="tcp", **k:
                         (True, "connected", jpg) if picture(url, transport) else (False, "no picture within 20 s", None))
     started, real_popen = [], subprocess.Popen
 

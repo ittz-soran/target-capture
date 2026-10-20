@@ -10,6 +10,7 @@ import os
 import queue
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 import cv2
@@ -27,6 +28,15 @@ Progress = Callable[[str, int, int, int, float], None]
 
 _END = object()
 _LIVE: dict = {}  # the run in progress: "timings" -> seconds per step so far
+
+
+def _keep_picture(path: str, image) -> None:
+    """Save a frame with a detection as a JPEG (skipped if a picture of it is already kept)."""
+    if not os.path.exists(path):
+        ok, buf = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        if ok:
+            with open(path, "wb") as fh:
+                fh.write(buf.tobytes())
 
 
 def live_timing() -> dict:
@@ -69,14 +79,15 @@ class _Worker(threading.Thread):
                 t0 = time.perf_counter()
                 rows = self.indexer.process(frame)
                 vehicles = self.indexer.drain_vehicles() if hasattr(self.indexer, "drain_vehicles") else []
-                sig = frame_signature(frame.image) if (rows or vehicles) and self.video else None
                 # keep a picture of frames with a plate or a face picture: results then show at
                 # once and exactly, without finding the frame in the video again
                 keep = self.keep and self.video and any(
                     self.kind == "plates" or r.get("face_jpg") for r in rows)
-                jpg = cv2.imencode(".jpg", frame.image, [cv2.IMWRITE_JPEG_QUALITY, 85])[1].tobytes() if keep else None
+                # The frame signature and the kept picture are made by the saving thread, not here:
+                # on 4K video they take about 40 ms a frame, which held up the detectors.
+                image = frame.image if (rows or vehicles) and self.video else None
                 self.busy += time.perf_counter() - t0
-                self.out.put((self.kind, frame.index, frame.t, rows, vehicles, sig, jpg))
+                self.out.put((self.kind, frame.index, frame.t, rows, vehicles, image, keep))
         except BaseException as e:  # handed to the saving thread, which stops the run
             self.out.put((self.kind, e))
             return
@@ -175,9 +186,12 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
     keep = load()["keep_frames"]
     kept_dir = store.kept_dir(media_id)
     workers = {k: _Worker(k, ix, nxt[k], info.kind == "video", out, stop, keep) for k, ix in todo.items()}
-    # both kinds: detect people and vehicles in one run per frame
-    detect = _Detect(detector if len(todo) > 1 else None, workers, out, stop)
+    # Vehicles (and people, when both are indexed) are found in their own thread, so the plate
+    # reader works on one frame while the detector already looks at the next.
+    detect = _Detect(detector if "plates" in todo else None, workers, out, stop)
     stats = {"decode": 0.0, "saving": 0.0}
+    # kept pictures are encoded in the background (OpenCV runs it outside Python's lock)
+    pictures = ThreadPoolExecutor(max_workers=2, thread_name_prefix="index-picture") if keep else None
     feeder = threading.Thread(target=_feed, daemon=True, name="index-decode",
                               args=(info.path, {k: rates[k] for k in todo}, min(nxt.values()), motion_skip,
                                     hw, {"detect": detect}, stop, stats, out))
@@ -185,7 +199,7 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
     def timings() -> dict:
         timing = {"decoding video": stats["decode"], "saving": stats["saving"]}
         if detect.busy:
-            timing["people + vehicle detector"] = detect.busy
+            timing["people + vehicle detector" if "persons" in todo else "vehicle detector"] = detect.busy
         for ix in todo.values():
             timing.update(getattr(ix, "timing", {}))
         timing["total"] = time.perf_counter() - started
@@ -217,19 +231,16 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
             if item[1] is _END:
                 running.discard(item[0])
                 continue
-            kind, index, t, rows, vehicles, sig, jpg = item
-            if jpg is not None:
-                t0 = time.perf_counter()
+            kind, index, t, rows, vehicles, image, keep_it = item
+            if keep_it and image is not None:
                 os.makedirs(kept_dir, exist_ok=True)
-                f = os.path.join(kept_dir, f"{index:08d}.jpg")
-                if not os.path.exists(f):
-                    with open(f, "wb") as fh:
-                        fh.write(jpg)
-                stats["saving"] += time.perf_counter() - t0
+                pictures.submit(_keep_picture, os.path.join(kept_dir, f"{index:08d}.jpg"), image)
             if vehicles:
                 store.add_vehicle_dets(media_id, vehicles)
-            if sig is not None:
-                store.add_frame_sig(media_id, index, sig)
+            if image is not None:
+                t0 = time.perf_counter()
+                store.add_frame_sig(media_id, index, frame_signature(image))
+                stats["saving"] += time.perf_counter() - t0
             pending[kind] += rows
             found[kind] += len(rows)
             nxt[kind] = index + 1
@@ -254,6 +265,8 @@ def index_passes(store: Store, media_id: int, info, indexers: dict, rates: dict,
         stop.set()
         for th in (feeder, detect, *workers.values()):  # models must be free before the next video
             th.join()
+        if pictures is not None:
+            pictures.shutdown(wait=True)  # every kept picture is on disk before results are shown
     for k in todo:
         add[k](media_id, pending[k])
         store.set_progress(media_id, k, total, done=True)
@@ -328,7 +341,7 @@ def index_media(store: Store, path: str, plates: bool = True, persons: bool = Tr
         idx.start(track_offset=store.max_track_id(mid) + 1)
         indexers["persons"], rates["persons"] = idx, person_fps
     detector = None
-    if len(indexers) > 1:
+    if "plates" in indexers:
         if "detector" not in _INDEXERS:
             _INDEXERS["detector"] = Detector()
         detector = _INDEXERS["detector"]

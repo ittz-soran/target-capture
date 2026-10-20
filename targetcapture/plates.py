@@ -74,6 +74,7 @@ class PlateIndexer:
         self.skip_empty = skip_empty
         self._tracker = _BoxTracker(first_id=track_offset)
         self._tracks: dict[int, dict] = {}   # vehicle track -> make/model found so far, last row saved
+        self._looks: dict[int, dict] = {}    # vehicle track -> its last second-look plate read (_look_due)
         self.vehicle_rows: list[dict] = []   # every vehicle seen, ~1 row per second per vehicle
         self.min_ocr_conf = min_ocr_conf
         self.min_chars = min_chars
@@ -309,12 +310,15 @@ class PlateIndexer:
         # (22F53857 on a 16:9 street view: 0.41 in the whole frame, 0.87 in the car crop). Vehicles
         # with no plate found get a look of their own; vehicle_crops = every vehicle (slower).
         fh, fw = img.shape[:2]
-        for _, (x1, y1, x2, y2), _ in vehicles:
+        for _, (x1, y1, x2, y2), tid in vehicles:
+            area = (x2 - x1) * (y2 - y1)
             if not self.vehicle_crops:
                 has_plate = any(x1 <= (r["x1"] + r["x2"]) / 2 <= x2 and y1 <= (r["y1"] + r["y2"]) / 2 <= y2
                                 for r in reads)
-                if has_plate or (x2 - x1) < 0.06 * fw or (x2 - x1) * (y2 - y1) > 0.5 * fw * fh:
+                if has_plate or (x2 - x1) < 0.06 * fw or area > 0.5 * fw * fh:
                     continue  # plate already found, too far away to read, or fills the view anyway
+                if not self._look_due(tid, frame.t, area):
+                    continue  # this vehicle was looked at a moment ago (see _look_due)
             crop = img[y1:y2, x1:x2]
             # A vehicle can be small in a wide / 4K frame even when its plate is sharp. The plate
             # detector shrinks its input to 384 px, so upscale a small crop first: the plate then
@@ -325,10 +329,12 @@ class PlateIndexer:
             if 0 < cw < _CROP_TARGET:
                 sc = min(_CROP_MAX_SCALE, _CROP_TARGET / cw)
                 crop = cv2.resize(crop, None, fx=sc, fy=sc, interpolation=cv2.INTER_CUBIC)
-            for r in self._read(crop):
+            looked = self._read(crop)
+            for r in looked:
                 _remap(r, sc, x1, y1)
                 if not any(_iou(r, o) > 0.3 for o in reads):
                     reads.append(r)
+            self._looked(tid, frame.t, area, looked)
         _add(self.timing, "plate reader", t0 + self.timing.get("Arabic plate check", 0.0) - arabic0)
         if not reads:
             return []
@@ -351,6 +357,36 @@ class PlateIndexer:
                 r.update(vx1=x1, vy1=y1, vx2=x2, vy2=y2, **infos[(x1, y1, x2, y2)])
         return reads
 
+    def _look_due(self, tid, t: float, area: int) -> bool:
+        """Read inside this vehicle now? Every sampled frame at first. Once its plate has been read
+        3 times, about once a second; after 2 looks that found no readable plate (a parked car with
+        its plate turned away, a car with no plate in view), about every 1.5 s. Always again when
+        the vehicle comes clearly closer, since a bigger plate reads better. On a busy street most
+        second looks were the same parked cars, frame after frame."""
+        s = self._looks.get(tid) if tid is not None else None
+        if s is None or area >= 1.3 * s["area"]:
+            return True
+        if s["hits"] >= 3:
+            wait = 1.0
+        elif s["misses"] >= 2:
+            wait = 1.5  # under group_unread's 2 s gap, so an unreadable plate stays one capture
+        else:
+            return True
+        return t - s["t"] >= wait
+
+    def _looked(self, tid, t: float, area: int, reads: list[dict]):
+        if tid is None:
+            return
+        s = self._looks.setdefault(tid, {"t": t, "area": area, "hits": 0, "misses": 0})
+        s["t"], s["area"] = t, area
+        if any(r["text"] for r in reads):
+            s["hits"] += 1
+            s["misses"] = 0
+        else:
+            s["misses"] += 1
+        if len(self._looks) > 2000:  # forget vehicles not looked at for a while
+            self._looks = {k: v for k, v in self._looks.items() if t - v["t"] <= 10}
+
     def start(self, memory=None, track_offset: int = 0, skip_empty: bool = False):
         """Get ready for a new video, keeping the loaded models (loading them takes seconds)."""
         self.memory = memory
@@ -358,6 +394,7 @@ class PlateIndexer:
         self.track_offset = track_offset
         self._tracker = _BoxTracker(first_id=track_offset)
         self._tracks, self.vehicle_rows = {}, []
+        self._looks = {}
         self._t, self._latin_seen = 0.0, []
         self.timing = {}
 

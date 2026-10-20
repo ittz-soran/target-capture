@@ -670,6 +670,156 @@ def known_dvrs(found: list[dict], cameras_too: bool = False) -> dict:
     return dict(sorted(out.items(), key=lambda nd: "net" not in nd[1]))  # the ones on the network first
 
 
+def live_stream_path(make, ip, user, password, port, ch):
+    """Which stream address form this DVR / NVR answers for channel `ch` (the same checks as
+    "Test channel 1 and add all channels"): (channel -> path or None, RTSP port, problem, notes)."""
+    from targetcapture.live import check_login, dvr_paths, hik_rtsp_port, rtsp_describe
+
+    notes = []
+    login, info = check_login(make, ip, user, password)
+    if login is False:
+        return None, port, f"the DVR's web login says: {info}.", notes
+    if login:
+        notes.append(f"Login is correct{' (' + info + ')' if info else ''}.")
+        set_port = hik_rtsp_port(ip, user, password) if make.lower().startswith("hik") else None
+        if set_port and set_port != port:
+            notes.append(f"The DVR's RTSP port is {set_port}, using that.")
+            port = set_port
+    for label, path in dvr_paths(make):
+        code, note = rtsp_describe(ip, port, path(ch), user, password)
+        notes.append(f"{label} ({path(ch)}): " + {200: "found", 401: "login refused", 404: "not on this DVR"}
+                     .get(code, f"no answer ({note})" if code is None else f"answer {code}"))
+        if code == 200:
+            return path, port, "", notes
+        if code is None:
+            return None, port, (f"no answer on port {port}: check that this PC is on the same network as the "
+                                "DVR, and the RTSP port in the DVR's network settings."), notes
+        if code == 401:  # same login on every path: do not lock the DVR with retries
+            return None, port, (note or "the DVR refuses this user name and password for video") + ".", notes
+    return None, port, "the DVR did not accept any of the usual stream addresses.", notes
+
+
+def live_dvr_picker(cams):
+    """Live cameras tab: pick a DVR / NVR, then its cameras, and start watching them live."""
+    from targetcapture import dvr as D
+
+    st.subheader("Watch cameras of a DVR / NVR")
+    if "live_dvr_msg" in st.session_state:
+        st.success(st.session_state.pop("live_dvr_msg"))
+    known_ = known_dvrs(st.session_state.get("dvr_found", []), st.session_state.get("dvr_cams_too", False))
+    if not known_:
+        st.info("No DVR / NVR found on this PC's network. Click **Search the network again** in the DVR footage "
+                "tab, or type its address under *Type a DVR / NVR address by hand* below.")
+        return
+    cams_seen = st.session_state.setdefault("dvr_cams", {})  # shared with the DVR footage tab
+    logins = st.session_state.setdefault("dvr_logins", {})   # typed this visit, not saved
+    names = list(known_)
+    if st.session_state.get("live_dvr_pick") not in names:
+        st.session_state["live_dvr_pick"] = names[0]
+
+    def pick_dvr():
+        sel = st.session_state["live_dvr_list"].selection.rows
+        if sel:
+            st.session_state["live_dvr_pick"] = names[sel[0]]
+
+    def row(n, d):
+        chans, model = cams_seen.get(at(d), (None, ""))
+        net = d.get("net") or {}
+        return {"DVR / NVR": n, "make": d["make"], "IP address": d["ip"],
+                "model": (model if chans is not None else "") or net.get("model", ""),
+                "cameras": f"{len(chans)} ({sum(c['status'] == 'online' for c in chans)} online)"
+                if chans is not None else ("type the password" if not (d["password"] or at(d) in logins) else ""),
+                "on network": "yes" if net else ""}
+
+    st.caption("1. Click a DVR / NVR.")
+    st.dataframe([row(n, d) for n, d in known_.items()], hide_index=True, width="stretch",
+                 on_select=pick_dvr, selection_mode="single-row", key="live_dvr_list")
+    pick = st.session_state["live_dvr_pick"]
+    d = known_[pick]
+    key = at(d)
+    user, pw = logins.get(key, (d["user"] or "admin", d["password"]))
+    if not pw:
+        with st.form("live_dvr_login"):
+            st.markdown(f"**{pick}**: type its login to see its cameras.")
+            c1, c2 = st.columns(2)
+            u = c1.text_input("User name", user, key=f"live_u_{key}")
+            p = c2.text_input("Password", type="password", key=f"live_p_{key}")
+            save = st.checkbox("Save this DVR's login for next time", True, key=f"live_save_{key}")
+            if st.form_submit_button("Show its cameras", type="primary") and p:
+                with st.spinner(f"Asking {pick} for its cameras…"):
+                    cams_seen[key] = D.list_channels(d["make"], d["ip"], u, p, int(d["http_port"] or 80))
+                if cams_seen[key][0] is None:
+                    st.error(f"Could not read the camera list: {cams_seen.pop(key)[1]}.")
+                else:
+                    logins[key] = (u, p)
+                    if save:
+                        name = d["name"] if d["source"] == "saved" else pick
+                        store.save_dvr(name, d["make"], d["ip"], u, p, int(d["http_port"] or 80),
+                                       int(d["rtsp_port"] or 554))
+                        st.session_state["live_dvr_pick"] = name
+                    st.rerun()
+        return
+    if key not in cams_seen:
+        with st.spinner(f"Asking {pick} for its cameras…"):
+            cams_seen[key] = D.list_channels(d["make"], d["ip"], user, pw, int(d["http_port"] or 80))
+    chans, model = cams_seen[key]
+    if chans is None:
+        st.error(f"Could not read {pick}'s cameras: {model}.")
+        if st.button("Ask again", key="live_dvr_retry"):
+            cams_seen.pop(key, None)
+            st.rerun()
+        return
+    if not chans:
+        st.info(f"{pick} answered but has no cameras / channels set up.")
+        return
+    base = d["name"] if d["source"] in ("saved", "Live cameras") else pick
+    have = {c["name"]: c for c in cams}
+    rows = [{"channel": c["channel"], "name": c["name"], "status": c["status"] or "unknown",
+             "type": "IP camera" if c["kind"] == "IP" else "analog", "IP address": c["ip"], "model": c["model"],
+             "live": ("watching" if have[f"{base} ch{c['channel']}"]["enabled"] else "added, switched off")
+             if f"{base} ch{c['channel']}" in have else ""} for c in chans]
+    st.caption(f"2. Select the cameras of **{pick}** to watch (click rows; Ctrl or Shift for several).")
+    ev = st.dataframe(rows, hide_index=True, width="stretch", on_select="rerun", selection_mode="multi-row",
+                      key=f"live_cam_table_{key}",
+                      column_config={"channel": st.column_config.NumberColumn(width="small")})
+    sel = [chans[i] for i in ev.selection.rows]
+    k1, k2, k3 = st.columns([1, 1, 2])
+    lp = k1.checkbox("Read plates", CFG["read_plates"], key="live_dvr_p")
+    lpp = k2.checkbox("Find people", CFG["find_people"], key="live_dvr_pp")
+    go = k3.button("3. Start live indexing on the selected cameras", type="primary", disabled=not sel,
+                   key="live_dvr_go")
+    if sel:
+        k3.caption(f"{len(sel)} selected: " + ", ".join(f"{c['channel']}" + (f" · {c['name']}" if c["name"] else "")
+                                                      for c in sel))
+    if not go:
+        return
+    with st.status(f"Connecting to channel {sel[0]['channel']}…", expanded=True) as box:
+        path, port, problem, notes = live_stream_path(d["make"], d["ip"], user, pw, int(d["rtsp_port"] or 554),
+                                                      sel[0]["channel"])
+        for n_ in notes:
+            st.write(n_)
+        box.update(label="Connected" if path else "Could not connect", state="complete" if path else "error")
+    if not path:
+        st.error(f"Could not connect: {problem}")
+        return
+    from targetcapture.live import stream_url
+
+    for c in sel:
+        name = f"{base} ch{c['channel']}"
+        url = stream_url(d["ip"], port, path(c["channel"]), user, pw)
+        if name in have:
+            store.update_camera(have[name]["id"], url=url, enabled=1, plates=int(lp), persons=int(lpp))
+        else:
+            store.add_camera(name, url, lp, lpp)
+    started = not live_running(store)
+    if started:
+        start_live()
+    st.session_state["live_dvr_msg"] = (
+        f"Watching {len(sel)} camera(s) of {pick} live. " + ("Live monitoring is starting: " if started else "")
+        + "each camera shows 'recording' within a minute. Every camera uses part of the graphics card.")
+    st.rerun()
+
+
 def dvr_cameras(found, picker_key, title):
     """The DVR's own camera list; picking a row points the footage download at that channel."""
     if not found:
@@ -994,6 +1144,9 @@ with tab_cams:
         if b1.button("Start live monitoring", type="primary", disabled=not cams):
             start_live()
             st.success("Starting… the cameras show 'recording' within a minute.")
+    live_dvr_picker(cams)
+    if cams:
+        st.subheader("Cameras being watched")
     for c in cams:
         row = st.columns([2, 4, 1, 1])
         row[0].markdown(f"**{c['name']}**")
@@ -1035,7 +1188,7 @@ with tab_cams:
             elif add and not cn:
                 st.error("Give the camera a name.")
 
-    with st.expander("Add a whole DVR / NVR (all its channels at once)",
+    with st.expander("Type a DVR / NVR address by hand (adds all its channels)",
                      expanded="dvr_msg" in st.session_state):
         if "dvr_msg" in st.session_state:
             st.success(st.session_state.pop("dvr_msg"))

@@ -33,11 +33,14 @@ class FakeDvr:
     """Answers DESCRIBE (digest login), SETUP, PLAY, then plays the clip in a loop over the RTSP
     connection. The setup NAL units are in the description only, never in the video."""
 
-    def __init__(self, nals, user="admin", password="pa@ss"):
+    def __init__(self, nals, user="admin", password="pa@ss", no_vps=False):
         self.params = []
-        for t in (32, 33, 34):  # the first VPS, SPS and PPS
-            self.params.append(next(n for n in nals if (n[0] >> 1) & 0x3F == t))
-        self.video = [n for n in nals if (n[0] >> 1) & 0x3F not in (32, 33, 34, 35, 39, 40)]
+        if no_vps:  # like the iDS-7204HUHI log: SPS and PPS come with each key frame, a VPS never does
+            self.video = [n for n in nals if (n[0] >> 1) & 0x3F not in (32, 35, 39, 40)]
+        else:
+            for t in (32, 33, 34):  # the first VPS, SPS and PPS, in the description only
+                self.params.append(next(n for n in nals if (n[0] >> 1) & 0x3F == t))
+            self.video = [n for n in nals if (n[0] >> 1) & 0x3F not in (32, 33, 34, 35, 39, 40)]
         self.user, self.password = user, password
         self.srv = socket.socket()
         self.srv.bind(("127.0.0.1", 0))
@@ -75,9 +78,10 @@ class FakeDvr:
                     continue
                 if method == "DESCRIBE":
                     sprop = ",".join(base64.b64encode(p).decode() for p in self.params)
+                    sprop = f"; sprop-parameter-sets={sprop}" if sprop else ""
                     sdp = ("v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=Media Presentation\r\nt=0 0\r\n"
                            "m=video 0 RTP/AVP 96\r\na=rtpmap:96 H265/90000\r\n"
-                           f"a=fmtp:96 profile-level-id=420029; packetization-mode=1; sprop-parameter-sets={sprop}\r\n"
+                           f"a=fmtp:96 profile-level-id=420029; packetization-mode=1{sprop}\r\n"
                            "a=control:rtsp://127.0.0.1/Streaming/Channels/101/trackID=1\r\n")
                     c.sendall(f"RTSP/1.0 200 OK\r\nCSeq: {cseq}\r\nContent-Type: application/sdp\r\n"
                               f"Content-Base: {uri}/\r\nContent-Length: {len(sdp)}\r\n\r\n{sdp}".encode())
@@ -175,3 +179,24 @@ def test_live_reader_switches_to_our_reader(dvr, monkeypatch):
         assert r.status == "live"
     finally:
         r.stop()
+
+
+def test_missing_vps_is_made_from_the_sps(tmp_path):
+    from targetcapture.live import test_camera
+    from targetcapture.rtsp import make_vps
+
+    nals = _hevc_nals(tmp_path)
+    sps = next(n for n in nals if (n[0] >> 1) & 0x3F == 33)
+    vps = make_vps(sps)
+    assert vps and (vps[0] >> 1) & 0x3F == 32
+
+    d = FakeDvr(nals, no_vps=True)
+    try:
+        url = f"rtsp://admin:pa%40ss@127.0.0.1:{d.port}/Streaming/Channels/101"
+        ok, msg, _ = test_camera(url, timeout=8, http_port=1)
+        assert not ok and "PPS id out of range" in msg  # as in Soran's log (SPS 33, PPS 34 undecodable)
+        ok, msg, jpg = test_camera(url, timeout=15, transport="own", http_port=1)
+        assert ok, msg
+        assert jpg[:2] == b"\xff\xd8"
+    finally:
+        d.close()

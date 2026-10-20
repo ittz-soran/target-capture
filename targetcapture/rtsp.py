@@ -74,6 +74,126 @@ def nal_type(nal: bytes, codec: str) -> int:
     return (nal[0] >> 1) & 0x3F if codec == "hevc" else nal[0] & 0x1F
 
 
+def _unescape(nal: bytes) -> bytes:
+    return re.sub(b"\x00\x00\x03", b"\x00\x00", nal)
+
+
+def _escape(rbsp: bytes) -> bytes:
+    out, zeros = bytearray(), 0
+    for b in rbsp:
+        if zeros >= 2 and b <= 3:
+            out.append(3)
+            zeros = 0
+        out.append(b)
+        zeros = zeros + 1 if b == 0 else 0
+    return bytes(out)
+
+
+class _Bits:
+    def __init__(self, data: bytes):
+        self.data, self.pos = data, 0
+
+    def u(self, n: int) -> int:
+        v = 0
+        for _ in range(n):
+            byte = self.data[self.pos >> 3] if (self.pos >> 3) < len(self.data) else 0
+            v = (v << 1) | ((byte >> (7 - (self.pos & 7))) & 1)
+            self.pos += 1
+        return v
+
+    def ue(self) -> int:
+        zeros = 0
+        while self.u(1) == 0:
+            zeros += 1
+            if zeros > 31:
+                raise ValueError("bad number")
+        return (1 << zeros) - 1 + self.u(zeros)
+
+
+class _BitWriter:
+    def __init__(self):
+        self.bits: list[int] = []
+
+    def u(self, n: int, v: int):
+        self.bits += [(v >> (n - 1 - i)) & 1 for i in range(n)]
+
+    def ue(self, v: int):
+        v += 1
+        n = v.bit_length()
+        self.u(n - 1, 0)
+        self.u(n, v)
+
+    def copy(self, r: _Bits, n: int):
+        for _ in range(n):
+            self.bits.append(r.u(1))
+
+    def done(self) -> bytes:
+        self.bits.append(1)  # rbsp stop bit
+        while len(self.bits) % 8:
+            self.bits.append(0)
+        return bytes(int("".join(map(str, self.bits[i:i + 8])), 2) for i in range(0, len(self.bits), 8))
+
+
+def _ptl_bits(r: _Bits, max_sub_layers_minus1: int) -> int:
+    """How many bits the profile_tier_level() at r takes (H.265 7.3.3)."""
+    start = r.pos
+    r.u(88)  # general profile, tier, flags
+    r.u(8)   # general level
+    present = []
+    for _ in range(max_sub_layers_minus1):
+        present.append((r.u(1), r.u(1)))
+    if max_sub_layers_minus1 > 0:
+        r.u(2 * (8 - max_sub_layers_minus1))
+    for prof, lev in present:
+        if prof:
+            r.u(88)
+        if lev:
+            r.u(8)
+    n = r.pos - start
+    r.pos = start
+    return n
+
+
+def make_vps(sps: bytes) -> bytes | None:
+    """A video parameter set (VPS) that fits this H.265 SPS, for DVRs that never send one: the
+    decoder needs it before it accepts the SPS ("Skipping invalid undecodable NALU: 33")."""
+    try:
+        r = _Bits(_unescape(sps[2:]))
+        vps_id, sub, nesting = r.u(4), r.u(3), r.u(1)
+        ptl_start, ptl_len = r.pos, _ptl_bits(r, sub)
+        r.pos = ptl_start + ptl_len
+        r.ue()  # sps id
+        chroma = r.ue()
+        if chroma == 3:
+            r.u(1)
+        r.ue(), r.ue()  # width, height
+        if r.u(1):
+            for _ in range(4):
+                r.ue()
+        r.ue(), r.ue()  # bit depths
+        r.ue()  # log2_max_pic_order_cnt_lsb_minus4
+        info_all = r.u(1)
+        order = [(r.ue(), r.ue(), r.ue()) for _ in range(0 if info_all else sub, sub + 1)]
+        w = _BitWriter()
+        w.u(4, vps_id)
+        w.u(1, 1), w.u(1, 1)  # base layer internal / available
+        w.u(6, 0)  # max layers - 1
+        w.u(3, sub), w.u(1, nesting)
+        w.u(16, 0xFFFF)
+        r.pos = ptl_start
+        w.copy(r, ptl_len)
+        w.u(1, 1 if info_all else 0)
+        for a, b, c in order:
+            w.ue(a), w.ue(b), w.ue(c)
+        w.u(6, 0)   # max layer id
+        w.ue(0)     # one layer set
+        w.u(1, 0)   # no timing info
+        w.u(1, 0)   # no extension
+        return bytes([32 << 1, sps[1]]) + _escape(w.done())
+    except (IndexError, ValueError):
+        return None
+
+
 class Depacketizer:
     """RTP payloads -> whole NAL units (RFC 7798 for H.265, RFC 6184 for H.264)."""
 
@@ -145,6 +265,8 @@ class RtspFeed:
         self.params: list[bytes] = []
         self.seen: dict[int, int] = {}  # NAL type -> how many came (for the details shown on failure)
         self.sent_params = False
+        self.has_vps = False
+        self.made_vps = False
         self._ka = 0.0
         self.lock = threading.Lock()
 
@@ -155,7 +277,8 @@ class RtspFeed:
             return ""
         if a["kind"] == "digest":
             h = lambda x: hashlib.md5(x.encode()).hexdigest()  # noqa: E731
-            resp = h(f"{h(f'{self.user}:{a['realm']}:{self.password}')}:{a['nonce']}:{h(f'{method}:{uri}')}")
+            realm, nonce = a["realm"], a["nonce"]  # (no quotes inside f-strings: Python before 3.12)
+            resp = h(f"{h(f'{self.user}:{realm}:{self.password}')}:{nonce}:{h(f'{method}:{uri}')}")
             return (f'Authorization: Digest username="{self.user}", realm="{a["realm"]}", nonce="{a["nonce"]}", '
                     f'uri="{uri}", response="{resp}"\r\n')
         return "Authorization: Basic " + base64.b64encode(f"{self.user}:{self.password}".encode()).decode() + "\r\n"
@@ -286,8 +409,24 @@ class RtspFeed:
                 self.seen[t] = self.seen.get(t, 0) + 1
                 if not self.sent_params:
                     if self.params:
+                        sps = next((p for p in self.params if nal_type(p, self.codec) == 33), None)
+                        if self.codec == "hevc" and sps and not any(nal_type(p, self.codec) == 32
+                                                                    for p in self.params):
+                            vps = make_vps(sps)
+                            if vps:
+                                self.params = [vps] + self.params
+                                self.made_vps = True
                         out += [START + p for p in self.params]
                     self.sent_params = True
+                    self.has_vps = any(nal_type(p, self.codec) == 32 for p in self.params)
+                if self.codec == "hevc" and not self.has_vps:
+                    if t == 32:
+                        self.has_vps = True
+                    elif t == 33:  # an SPS with no VPS before it: make one
+                        vps = make_vps(nal)
+                        if vps:
+                            out.append(START + vps)
+                            self.made_vps = True
                 out.append(START + nal)
             if out:
                 yield b"".join(out)
@@ -304,7 +443,7 @@ class RtspFeed:
             got[k] = got.get(k, 0) + n
         what = ", ".join(f"{k} {v}" for k, v in sorted(got.items())) or "no video"
         return (f"{'H.265' if self.codec == 'hevc' else 'H.264'}; setup data in the description: "
-                f"{len(self.params)}; received: {what}")
+                f"{len(self.params)}; received: {what}" + ("; made the missing VPS" if self.made_vps else ""))
 
     def close(self):
         try:

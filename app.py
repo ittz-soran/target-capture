@@ -783,27 +783,62 @@ def live_dvr_picker(cams):
                       key=f"live_cam_table_{key}",
                       column_config={"channel": st.column_config.NumberColumn(width="small")})
     sel = [chans[i] for i in ev.selection.rows]
+    st.caption(f"3. The login used for the video of **{pick}**" + (" (saved)." if d["password"] else ".")
+               + " Change it here if it is not right.")
+    l1, l2, l3 = st.columns([1, 1, 2])
+    user = l1.text_input("User name", user, key=f"live_vu_{key}")
+    pw = l2.text_input("Password", pw, type="password", key=f"live_vp_{key}")
     k1, k2, k3 = st.columns([1, 1, 2])
     lp = k1.checkbox("Read plates", CFG["read_plates"], key="live_dvr_p")
     lpp = k2.checkbox("Find people", CFG["find_people"], key="live_dvr_pp")
-    go = k3.button("3. Start live indexing on the selected cameras", type="primary", disabled=not sel,
+    go = k3.button("4. Start live indexing on the selected cameras", type="primary", disabled=not (sel and pw),
                    key="live_dvr_go")
     if sel:
         k3.caption(f"{len(sel)} selected: " + ", ".join(f"{c['channel']}" + (f" · {c['name']}" if c["name"] else "")
                                                       for c in sel))
+    if "live_dvr_pic" in st.session_state:
+        jpg, caption = st.session_state.pop("live_dvr_pic")
+        st.image(jpg, caption=caption, width=480)
     if not go:
         return
-    with st.status(f"Connecting to channel {sel[0]['channel']}…", expanded=True) as box:
-        path, port, problem, notes = live_stream_path(d["make"], d["ip"], user, pw, int(d["rtsp_port"] or 554),
-                                                      sel[0]["channel"])
-        for n_ in notes:
-            st.write(n_)
-        box.update(label="Connected" if path else "Could not connect", state="complete" if path else "error")
-    if not path:
-        st.error(f"Could not connect: {problem}")
-        return
-    from targetcapture.live import stream_url
+    from targetcapture.live import stream_url, sub_stream, test_camera
 
+    first = sel[0]["channel"]
+    notes, ok, jpg, how = [], False, None, ""
+    with st.status(f"Connecting to channel {first}…", expanded=True) as box:
+        path, port, problem, steps = live_stream_path(d["make"], d["ip"], user, pw, int(d["rtsp_port"] or 554), first)
+        notes += steps
+        for n_ in steps:
+            st.write(n_)
+        if path:
+            # The stream address answering is not enough: get a real picture, as the hand-typed form does.
+            # Many DVRs send no usable picture on the main stream (H.265+), but do on the sub stream.
+            tries = [("main stream", path, "tcp", 20), ("sub stream", lambda ch, main=path: sub_stream(main(ch)), "tcp", 15),
+                     ("main stream over UDP", path, "udp", 15)]
+            for how, p_, transport, secs in tries:
+                if how == "sub stream" and p_(first) == path(first):
+                    continue
+                st.write(f"Getting a picture from the {how} (up to {secs} s)…")
+                ok, msg, jpg = test_camera(stream_url(d["ip"], port, p_(first), user, pw), secs, transport)
+                notes.append(f"{how} ({p_(first)}): {msg}")
+                st.write(msg)
+                if ok:
+                    path = p_
+                    break
+        box.update(label=f"Got a picture ({how})" if ok else "Could not connect", state="complete" if ok else "error")
+    if not path or not ok:
+        if not path:
+            st.error(f"Could not connect to channel {first}: {problem}")
+        else:
+            st.error(f"Channel {first} answers, but sent no picture on the main stream, the sub stream or over UDP. "
+                     "Check that a camera is connected to it, and in the DVR's Video settings set the video type to "
+                     "H.264 instead of H.265 / H.265+. Nothing was added.")
+        with st.expander("Details (send these if you ask for help)"):
+            st.code("\n".join(notes))
+        return
+    logins[key] = (user, pw)
+    if d["source"] == "saved" and (user, pw) != (d["user"], d["password"]):
+        store.save_dvr(d["name"], d["make"], d["ip"], user, pw, int(d["http_port"] or 80), port)
     for c in sel:
         name = f"{base} ch{c['channel']}"
         url = stream_url(d["ip"], port, path(c["channel"]), user, pw)
@@ -814,8 +849,10 @@ def live_dvr_picker(cams):
     started = not live_running(store)
     if started:
         start_live()
+    st.session_state["live_dvr_pic"] = (jpg, f"Channel {first} ({how})")
     st.session_state["live_dvr_msg"] = (
-        f"Watching {len(sel)} camera(s) of {pick} live. " + ("Live monitoring is starting: " if started else "")
+        f"Watching {len(sel)} camera(s) of {pick} live" + (f", using the {how}" if how != "main stream" else "") + ". "
+        + ("Live monitoring is starting: " if started else "")
         + "each camera shows 'recording' within a minute. Every camera uses part of the graphics card.")
     st.rerun()
 
@@ -1271,7 +1308,7 @@ with tab_cams:
                     else:
                         label, path = found
 
-                        tries = [("main stream", path, "tcp", 20), ("sub stream", lambda ch: sub_stream(path(ch)), "tcp", 15),
+                        tries = [("main stream", path, "tcp", 20), ("sub stream", lambda ch, main=path: sub_stream(main(ch)), "tcp", 15),
                                  ("main stream over UDP", path, "udp", 15)]
                         ok, jpg, notes = False, None, []
                         with st.status("Getting a picture from channel 1…", expanded=True) as box:

@@ -52,10 +52,13 @@ def test_live_cameras_dvr_picker(tmp_path, monkeypatch):
     assert any("Shop NVR" in c.value for c in at.caption)
 
 
-def test_live_cameras_dvr_picker_starts_selected_camera(tmp_path, monkeypatch):
-    """Picking a camera and clicking Start adds it with the DVR's stream address and starts live monitoring."""
+def _live_picker_app(tmp_path, monkeypatch, picture):
+    """App with a saved DVR (2 cameras, channel 2 selected), its network calls stubbed. picture(url,
+    transport) says whether that stream gives a picture. Returns (app, store, live processes started)."""
     import subprocess
 
+    import cv2
+    import numpy as np
     from streamlit.testing.v1 import AppTest
 
     import targetcapture.live as LV
@@ -68,6 +71,9 @@ def test_live_cameras_dvr_picker_starts_selected_camera(tmp_path, monkeypatch):
     monkeypatch.setattr(LV, "hik_rtsp_port", lambda *a: None)
     monkeypatch.setattr(LV, "rtsp_describe", lambda ip, port, path, u, p, timeout=6:
                         (200, "") if path.startswith("/Streaming/Channels/") else (404, ""))
+    jpg = cv2.imencode(".jpg", np.zeros((90, 160, 3), np.uint8))[1].tobytes()
+    monkeypatch.setattr(LV, "test_camera", lambda url, timeout=15, transport="tcp":
+                        (True, "connected", jpg) if picture(url, transport) else (False, "no picture within 20 s", None))
     started, real_popen = [], subprocess.Popen
 
     class FakePopen(real_popen):  # the live monitoring process is not really started
@@ -88,9 +94,25 @@ def test_live_cameras_dvr_picker_starts_selected_camera(tmp_path, monkeypatch):
                                                           dict(cam, channel=2, name="Street")], "DS-7608NI")}
     at.session_state["live_cam_table_192.168.1.230:80"] = {"selection": {"rows": [1], "columns": []}}
     at.run()
+    return at, store, started
+
+
+def test_live_cameras_dvr_picker_uses_the_stream_that_gives_a_picture(tmp_path, monkeypatch):
+    """No picture on the main stream (e.g. H.265+), one on the sub stream: the camera is added with the
+    sub-stream address, and live monitoring starts."""
+    at, store, started = _live_picker_app(tmp_path, monkeypatch, lambda url, tr: url.endswith("/202"))
+    assert at.text_input(key="live_vp_192.168.1.230:80").value == "secret"  # the saved login is shown
     at.button(key="live_dvr_go").click().run()
     assert not at.exception
     assert [(c["name"], c["url"], c["enabled"]) for c in store.cameras()] == [
-        ("Shop NVR ch2", "rtsp://admin:secret@192.168.1.230:554/Streaming/Channels/201", 1)]
+        ("Shop NVR ch2", "rtsp://admin:secret@192.168.1.230:554/Streaming/Channels/202", 1)]
     assert len(started) == 1
-    assert any(m.value.startswith("Watching 1 camera(s) of Shop NVR") for m in at.success)
+    assert any(m.value.startswith("Watching 1 camera(s) of Shop NVR live, using the sub stream") for m in at.success)
+
+
+def test_live_cameras_dvr_picker_adds_nothing_without_a_picture(tmp_path, monkeypatch):
+    at, store, started = _live_picker_app(tmp_path, monkeypatch, lambda url, tr: False)
+    at.button(key="live_dvr_go").click().run()
+    assert not at.exception
+    assert store.cameras() == [] and started == []
+    assert any("sent no picture" in e.value for e in at.error)

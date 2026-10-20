@@ -813,7 +813,8 @@ def live_dvr_picker(cams):
         if path:
             # The stream address answering is not enough: get a real picture, as the hand-typed form does.
             # Many DVRs send no usable picture on the main stream (H.265+), but do on the sub stream.
-            tries = [("main stream", path, "tcp", 20), ("sub stream", lambda ch, main=path: sub_stream(main(ch)), "tcp", 15),
+            tries = [("main stream", path, "tcp", 20), ("main stream, read by Target Capture itself", path, "own", 20),
+                     ("sub stream", lambda ch, main=path: sub_stream(main(ch)), "tcp", 15),
                      ("main stream over UDP", path, "udp", 15)]
             for how, p_, transport, secs in tries:
                 if how == "sub stream" and p_(first) == path(first):
@@ -1309,7 +1310,8 @@ with tab_cams:
                     else:
                         label, path = found
 
-                        tries = [("main stream", path, "tcp", 20), ("sub stream", lambda ch, main=path: sub_stream(main(ch)), "tcp", 15),
+                        tries = [("main stream", path, "tcp", 20), ("main stream, read by Target Capture itself", path, "own", 20),
+                                 ("sub stream", lambda ch, main=path: sub_stream(main(ch)), "tcp", 15),
                                  ("main stream over UDP", path, "udp", 15)]
                         ok, jpg, notes = False, None, []
                         with st.status("Getting a picture from channel 1…", expanded=True) as box:

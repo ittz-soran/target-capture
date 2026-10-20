@@ -109,6 +109,8 @@ def test_camera(url: str, timeout: float = 15, transport: str = "tcp",
     exe = ffmpeg_exe()
     if not exe:
         return False, "ffmpeg is not available (pip install imageio-ffmpeg)", None
+    if transport == "own":
+        return _test_own_reader(exe, url, timeout, http_port)
     cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "warning", *_input_args(url, transport),
            "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]
     flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
@@ -125,6 +127,51 @@ def test_camera(url: str, timeout: float = 15, transport: str = "tcp",
                                                            " (connected, but no video came)"), None
     if proc.returncode or not out:
         return False, _ffmpeg_reason(err) or "could not read the stream", None
+    return True, "connected", out
+
+
+def _own_reader_input(codec: str) -> list[str]:
+    """ffmpeg input for video handed over by our own RTSP reader (see rtsp.py)."""
+    return ["-use_wallclock_as_timestamps", "1", "-probesize", "2000000", "-f", codec, "-i", "pipe:0"]
+
+
+def _test_own_reader(exe: str, url: str, timeout: float, http_port: int) -> tuple[bool, str, bytes | None]:
+    """test_camera with our own RTSP reader feeding ffmpeg (DVRs whose H.265 ffmpeg cannot start)."""
+    from .rtsp import RtspFeed, pump
+
+    t0 = time.time()
+    try:
+        feed = RtspFeed(url, timeout=min(10, timeout)).open()
+    except (OSError, PermissionError, ConnectionError) as e:
+        return False, str(e) or "no answer", None
+    cmd = [exe, "-nostdin", "-hide_banner", "-loglevel", "warning", *_own_reader_input(feed.codec),
+           "-frames:v", "1", "-f", "image2pipe", "-vcodec", "mjpeg", "-"]
+    flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if os.name == "nt" else 0
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            creationflags=flags)
+    done = lambda: proc.poll() is not None  # noqa: E731
+    threading.Thread(target=pump, args=(feed, proc.stdin, done), daemon=True).start()
+    _keep_asking_keyframe(url, http_port, done)
+    got: dict[str, bytes] = {}  # read here, not with communicate(), which would close the pump's pipe
+    readers = [threading.Thread(target=lambda k=k, f=f: got.__setitem__(k, f.read()), daemon=True)
+               for k, f in (("out", proc.stdout), ("err", proc.stderr))]
+    for r in readers:
+        r.start()
+    try:
+        proc.wait(timeout=max(1.0, timeout - (time.time() - t0)))
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        timed_out = True
+    for r in readers:
+        r.join(5)
+    out, err = got.get("out", b""), got.get("err", b"")
+    if timed_out:
+        why = _ffmpeg_reason(err)
+        return False, f"no picture within {timeout:g} s ({feed.details()}" + (f"; ffmpeg: {why})" if why else ")"), None
+    if proc.returncode or not out:
+        return False, f"{_ffmpeg_reason(err) or 'could not read the stream'} ({feed.details()})", None
     return True, "connected", out
 
 
@@ -373,7 +420,9 @@ class StreamReader(threading.Thread):
         self.status = "connecting"
         self.proc: subprocess.Popen | None = None
         self.err: list[str] = []
-        self.transport = "tcp"  # switches to udp (and back) when a DVR sends nothing over tcp
+        self.transport = "tcp"  # tcp, then udp, then "own" (our RTSP reader) when no picture comes
+        self.feed = None
+        self.undecodable = False
         self.http_port = 80  # where a Hikvision DVR answers key-frame requests
 
     def take(self):
@@ -388,6 +437,8 @@ class StreamReader(threading.Thread):
             cmd += ["-hwaccel", "auto"]
         if os.path.isfile(self.url):  # a video file played as if it were a camera (trying things out)
             cmd += ["-re", "-stream_loop", "-1", "-i", self.url]
+        elif self.feed is not None:  # our own RTSP reader hands the video over (see rtsp.py)
+            cmd += ["-fflags", "+discardcorrupt+nobuffer", "-flags", "low_delay", *_own_reader_input(self.feed.codec)]
         else:
             if self.url.lower().startswith("rtsp"):
                 cmd += ["-rtsp_transport", self.transport, "-timeout", "10000000"]
@@ -401,8 +452,9 @@ class StreamReader(threading.Thread):
             m = re.search(r"Stream #\S+.*Video: .*?(\d{2,5})x(\d{2,5})", line)
             if m and not size:
                 size.extend([int(m.group(1)), int(m.group(2))])
-            elif re.search(r"error|failed|unauthorized|not found|refused|timed out", line, re.I) \
-                    and "PPS id" not in line:
+            elif _DECODE_NOISE.search(line) or "undecodable" in line:
+                self.undecodable = True
+            elif re.search(r"error|failed|unauthorized|not found|refused|timed out", line, re.I):
                 self.err = (self.err + [line])[-5:]
 
     def run(self):
@@ -414,9 +466,26 @@ class StreamReader(threading.Thread):
         while not self.stop_ev.is_set():
             size: list[int] = []
             self.err = []
-            self.proc = proc = subprocess.Popen(self._command(exe), stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                                stderr=subprocess.PIPE, creationflags=flags, bufsize=0)
+            self.feed = None
+            self.undecodable = False
+            if self.transport == "own":
+                from .rtsp import RtspFeed
+                try:
+                    self.feed = RtspFeed(self.url).open()
+                except (OSError, PermissionError, ConnectionError) as e:
+                    self.err = [str(e) or "no answer"]
+                    self.transport = "tcp"
+                    self.status = f"not connected: {explain_error(self.err[0])} Trying again…"
+                    self.stop_ev.wait(5)
+                    continue
+            self.proc = proc = subprocess.Popen(
+                self._command(exe), stdin=subprocess.PIPE if self.feed else subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=flags, bufsize=0)
             threading.Thread(target=self._read_errors, args=(proc, size), daemon=True).start()
+            if self.feed is not None:
+                from .rtsp import pump
+                threading.Thread(target=pump, args=(self.feed, proc.stdin, lambda: proc.poll() is not None
+                                                    or self.stop_ev.is_set()), daemon=True).start()
             first = [False]  # H.265+ may not send a key frame for a long time: ask for one
             _keep_asking_keyframe(self.url, self.http_port, lambda: first[0] or proc.poll() is not None
                                   or self.stop_ev.is_set())
@@ -452,7 +521,10 @@ class StreamReader(threading.Thread):
             first[0] = True
             self._kill(proc)
             if not got and self.url.lower().startswith("rtsp"):
-                self.transport = "udp" if self.transport == "tcp" else "tcp"
+                if self.undecodable and self.transport != "own":
+                    self.transport = "own"  # the video came but could not be decoded: read it ourselves
+                else:
+                    self.transport = {"tcp": "udp", "udp": "own"}.get(self.transport, "tcp")
             if not self.stop_ev.is_set():
                 why = explain_error(" ".join(self.err)) if self.err else "no picture"
                 self.status = f"not connected: {why} Trying again…"

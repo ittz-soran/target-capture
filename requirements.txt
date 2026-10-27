@@ -8,6 +8,8 @@ onnxruntime>=1.17
 opencv-python-headless>=4.8
 imageio-ffmpeg          # repairs DVR files that cannot jump to an exact frame
 numpy
+truststore              # https model downloads use Windows' certificate check
+certifi
 tqdm
 lap                     # used by the ByteTrack tracker
 streamlit>=1.60         # web UI (app.py)

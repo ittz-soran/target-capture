@@ -4,7 +4,7 @@ version = "0.2.0"
 description = "Index long CCTV/DVR videos once, then search them for license plates or people."
 requires-python = ">=3.10"
 dependencies = ["ultralytics>=8.3", "fast-alpr[onnx]>=0.3", "easyocr>=1.7", "open_clip_torch>=2.20", "insightface>=0.7.3", "onnxruntime>=1.17",
-                "opencv-python-headless>=4.8", "numpy", "tqdm", "lap"]
+                "opencv-python-headless>=4.8", "numpy", "tqdm", "lap", "truststore", "certifi"]
 
 [project.optional-dependencies]
 ui = ["streamlit>=1.30"]
